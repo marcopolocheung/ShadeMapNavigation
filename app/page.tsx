@@ -452,6 +452,25 @@ export default function Home() {
     setSelectedRouteIndex(0);
   }, []);
 
+  const handleMarkerDragEnd = useCallback(
+    (slot: 'A' | 'B', coord: { lng: number; lat: number }) => {
+      const lngLat: [number, number] = [coord.lng, coord.lat];
+      const coordLabel = `${coord.lat.toFixed(3)}, ${coord.lng.toFixed(3)}`;
+      setNavRoutes([]);
+      setSelectedRouteIndex(0);
+      if (slot === 'A') {
+        setWaypointA(lngLat);
+        setWaypointALabel(coordLabel);
+        geocodeReverse(coord.lat, coord.lng).then((lbl) => { if (lbl) setWaypointALabel(lbl); });
+      } else {
+        setWaypointB(lngLat);
+        setWaypointBLabel(coordLabel);
+        geocodeReverse(coord.lat, coord.lng).then((lbl) => { if (lbl) setWaypointBLabel(lbl); });
+      }
+    },
+    []
+  );
+
   const handleClearWaypointB = useCallback(() => {
     setWaypointB(null);
     setWaypointBLabel(null);
@@ -696,6 +715,8 @@ export default function Home() {
         navWaypoints={{ a: waypointA ?? undefined, b: waypointB ?? undefined }}
         navRoute={selectedNavRoute}
         showSunLines={showSunLines}
+        mapClickActive={pendingSlot !== null}
+        onMarkerDragEnd={handleMarkerDragEnd}
       />
 
       {/* Pending waypoint selection banner */}
@@ -707,10 +728,12 @@ export default function Home() {
         </div>
       )}
 
-      {/* Top-left overlay: search */}
-      <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
-        <LocationSearch onSelect={flyTo} />
-      </div>
+      {/* Top-left overlay: search — hidden when nav sidebar is active (it moves inside sidebar) */}
+      {!navMode && (
+        <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
+          <LocationSearch onSelect={flyTo} />
+        </div>
+      )}
 
       {/* Full-width timeline ruler + controls */}
       {!accumulation.enabled && (
@@ -881,6 +904,7 @@ export default function Home() {
         solarIntensity={routeSolarIntensity}
         pendingSlot={pendingSlot}
         onSetPendingSlot={setPendingSlot}
+        locationSearchSlot={navMode ? <LocationSearch onSelect={flyTo} /> : undefined}
       />
     </div>
   );

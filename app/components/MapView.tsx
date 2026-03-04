@@ -19,6 +19,8 @@ interface MapViewProps {
   navWaypoints?: { a?: [number, number]; b?: [number, number] };
   navRoute?: GeoJSON.Feature<GeoJSON.LineString> | null;
   showSunLines?: boolean;
+  mapClickActive?: boolean;
+  onMarkerDragEnd?: (slot: 'A' | 'B', coord: { lng: number; lat: number }) => void;
 }
 
 const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_API_KEY ?? "";
@@ -134,6 +136,8 @@ export default function MapView({
   navWaypoints,
   navRoute,
   showSunLines = false,
+  mapClickActive = false,
+  onMarkerDragEnd,
 }: MapViewProps) {
   const containerRef    = useRef<HTMLDivElement>(null);
   const mapRef          = useRef<maplibregl.Map | null>(null);
@@ -142,16 +146,18 @@ export default function MapView({
   const initRef         = useRef(false);
   const dateRef         = useRef(date);
   const shadeUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const onMapClickRef   = useRef(onMapClick);
-  const markerARef      = useRef<maplibregl.Marker | null>(null);
-  const markerBRef      = useRef<maplibregl.Marker | null>(null);
-  const showSunLinesRef = useRef(showSunLines);
+  const onMapClickRef      = useRef(onMapClick);
+  const onMarkerDragEndRef = useRef(onMarkerDragEnd);
+  const markerARef         = useRef<maplibregl.Marker | null>(null);
+  const markerBRef         = useRef<maplibregl.Marker | null>(null);
+  const showSunLinesRef    = useRef(showSunLines);
 
   const [sunViz, setSunViz] = useState<SunViz>({
     sunAz: 180, riseAz: null, setAz: null, bearing: 0,
   });
 
   useEffect(() => { onMapClickRef.current = onMapClick; }, [onMapClick]);
+  useEffect(() => { onMarkerDragEndRef.current = onMarkerDragEnd; }, [onMarkerDragEnd]);
 
   // -------------------------------------------------------------------------
   // Initialize map once
@@ -365,10 +371,26 @@ export default function MapView({
     if (!map) return;
     markerARef.current?.remove(); markerARef.current = null;
     markerBRef.current?.remove(); markerBRef.current = null;
-    if (navWaypoints?.a)
-      markerARef.current = new maplibregl.Marker({ color: "#22c55e" }).setLngLat(navWaypoints.a).addTo(map);
-    if (navWaypoints?.b)
-      markerBRef.current = new maplibregl.Marker({ color: "#ef4444" }).setLngLat(navWaypoints.b).addTo(map);
+    if (navWaypoints?.a) {
+      const mA = new maplibregl.Marker({ color: "#22c55e", draggable: true })
+        .setLngLat(navWaypoints.a)
+        .addTo(map);
+      mA.on('dragend', () => {
+        const ll = mA.getLngLat();
+        onMarkerDragEndRef.current?.('A', { lng: ll.lng, lat: ll.lat });
+      });
+      markerARef.current = mA;
+    }
+    if (navWaypoints?.b) {
+      const mB = new maplibregl.Marker({ color: "#ef4444", draggable: true })
+        .setLngLat(navWaypoints.b)
+        .addTo(map);
+      mB.on('dragend', () => {
+        const ll = mB.getLngLat();
+        onMarkerDragEndRef.current?.('B', { lng: ll.lng, lat: ll.lat });
+      });
+      markerBRef.current = mB;
+    }
   }, [navWaypoints]);
 
   // -------------------------------------------------------------------------
@@ -430,7 +452,7 @@ export default function MapView({
   // -------------------------------------------------------------------------
   return (
     <div className="relative w-full h-full">
-      <div ref={containerRef} className="w-full h-full" />
+      <div ref={containerRef} className={`w-full h-full${mapClickActive ? ' cursor-crosshair' : ''}`} />
 
       {showSunLines && (
         <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
