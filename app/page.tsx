@@ -8,8 +8,11 @@ import TimelineSlider from "./components/TimelineSlider";
 import AccumulationPanel from "./components/AccumulationPanel";
 import NavigationPanel from "./components/NavigationPanel";
 import SettingsPanel from "./components/SettingsPanel";
+import DateInput from "./components/DateInput";
+import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
+import { geocodeReverse } from "./lib/nominatim";
 import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, RouteOption } from "./lib/routing";
 import type { GraphEdge, RoutingGraph } from "./lib/routing";
 import { recordRoutingRun, computeDerivedKpis } from "./lib/metrics";
@@ -63,6 +66,11 @@ function parseTime(s: string): number | null {
     if (h < 0 || h > 23) return null;
   }
   return h * 60 + m;
+}
+
+function dateToDayOfYear(d: Date): number {
+  const start = new Date(d.getFullYear(), 0, 1);
+  return Math.floor((d.getTime() - start.getTime()) / 86400000);
 }
 
 function TimeInput({ date, onChange }: { date: Date; onChange: (d: Date) => void }) {
@@ -134,7 +142,7 @@ function TimeInput({ date, onChange }: { date: Date; onChange: (d: Date) => void
  * Dijkstra can pick the shaded sidewalk without any change to the core algorithm.
  */
 function sampleBothSidewalks(
-  map: maplibregl.Map,
+  projectFn: (lng: number, lat: number) => [number, number],
   imageData: ImageData,
   dpr: number,
   from: [number, number], // [lng, lat], canonical direction
@@ -150,10 +158,9 @@ function sampleBothSidewalks(
       const t = i / samples;
       const lng = from[0] + t * (to[0] - from[0]) + oLng;
       const lat = from[1] + t * (to[1] - from[1]) + oLat;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const pt = map.project([lng, lat] as any);
-      const x = Math.round(pt.x * dpr);
-      const y = Math.round(pt.y * dpr);
+      const [px, py] = projectFn(lng, lat);
+      const x = Math.round(px * dpr);
+      const y = Math.round(py * dpr);
       if (x < 0 || y < 0 || x >= width || y >= height) continue;
       const idx = (y * width + x) * 4;
       const r = data[idx];
@@ -233,8 +240,14 @@ export default function Home() {
   const [isCalculating, setIsCalculating] = useState(false);
   const [navError, setNavError] = useState<string | null>(null);
   const [routeSolarIntensity, setRouteSolarIntensity] = useState<number | null>(null);
+  const [waypointALabel, setWaypointALabel] = useState<string | null>(null);
+  const [waypointBLabel, setWaypointBLabel] = useState<string | null>(null);
+  const [pendingSlot, setPendingSlot] = useState<'A' | 'B' | null>(null);
+  const pendingSlotRef = useRef<'A' | 'B' | null>(null);
+  pendingSlotRef.current = pendingSlot;
 
   const [isPlaying, setIsPlaying] = useState(false);
+  const [sliderMode, setSliderMode] = useState<"time" | "day">("time");
   const animTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Map center for passing to the timeline slider's sunrise/sunset calculation
@@ -246,10 +259,16 @@ export default function Home() {
   // Refs so imperative callbacks always see current values without re-creating
   const waypointARef = useRef(waypointA);
   const waypointBRef = useRef(waypointB);
+  const waypointALabelRef = useRef(waypointALabel);
+  const waypointBLabelRef = useRef(waypointBLabel);
   const dateRef = useRef(date);
+  const sliderModeRef = useRef<"time" | "day">("time");
   waypointARef.current = waypointA;
   waypointBRef.current = waypointB;
+  waypointALabelRef.current = waypointALabel;
+  waypointBLabelRef.current = waypointBLabel;
   dateRef.current = date;
+  sliderModeRef.current = sliderMode;
 
   // Advance 2 minutes per tick at 50ms → ~24s per full day
   useEffect(() => {
@@ -257,8 +276,19 @@ export default function Home() {
       animTimerRef.current = setInterval(() => {
         setDate((prev) => {
           const next = new Date(prev);
-          const total = prev.getHours() * 60 + prev.getMinutes() + 2;
-          next.setHours(Math.floor(total / 60) % 24, total % 60, 0, 0);
+          if (sliderModeRef.current === "day") {
+            const doy = dateToDayOfYear(prev);
+            const yr = prev.getFullYear();
+            const isLeap = (yr % 4 === 0 && yr % 100 !== 0) || yr % 400 === 0;
+            const nextDoy = (doy + 1) % (isLeap ? 366 : 365);
+            const start = new Date(yr, 0, 1);
+            const advanced = new Date(start.getTime() + nextDoy * 86400000);
+            advanced.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
+            return advanced;
+          } else {
+            const total = prev.getHours() * 60 + prev.getMinutes() + 2;
+            next.setHours(Math.floor(total / 60) % 24, total % 60, 0, 0);
+          }
           return next;
         });
       }, 50);
@@ -273,6 +303,14 @@ export default function Home() {
     };
   }, [isPlaying]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPendingSlot(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const handleMapReady = useCallback((map: maplibregl.Map) => {
     mapRef.current = map;
     const { lat, lng } = map.getCenter();
@@ -285,8 +323,26 @@ export default function Home() {
 
   const handleSliderChange = useCallback((m: number) => {
     setDate((prev) => {
+      if (prev.getHours() * 60 + prev.getMinutes() === m) return prev;
       const next = new Date(prev);
       next.setHours(Math.floor(m / 60), m % 60, 0, 0);
+      return next;
+    });
+  }, []);
+
+  const handleDayOfYearChange = useCallback((day: number) => {
+    setDate((prev) => {
+      const start = new Date(prev.getFullYear(), 0, 1);
+      const next = new Date(start.getTime() + day * 86400000);
+      next.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
+      return next;
+    });
+  }, []);
+
+  const adjustYear = useCallback((delta: number) => {
+    setDate((prev) => {
+      const next = new Date(prev);
+      next.setFullYear(prev.getFullYear() + delta);
       return next;
     });
   }, []);
@@ -307,32 +363,38 @@ export default function Home() {
 
   const handleMapClick = useCallback(
     (coord: { lng: number; lat: number }) => {
-      if (!navMode) return;
+      const slot = pendingSlotRef.current;
+      if (!slot) return;
       setNavError(null);
-      const a = waypointARef.current;
-      const b = waypointBRef.current;
-      if (!a) {
-        setWaypointA([coord.lng, coord.lat]);
-      } else if (!b) {
-        setWaypointB([coord.lng, coord.lat]);
+      const lngLat: [number, number] = [coord.lng, coord.lat];
+      const coordLabel = `${coord.lat.toFixed(3)}, ${coord.lng.toFixed(3)}`;
+      if (slot === 'A') {
+        setWaypointA(lngLat);
+        setWaypointALabel(coordLabel);
+        geocodeReverse(coord.lat, coord.lng).then((lbl) => { if (lbl) setWaypointALabel(lbl); });
+        setPendingSlot(waypointBRef.current ? null : 'B');
       } else {
-        // Third click: reset to new A, clear route
-        setWaypointA([coord.lng, coord.lat]);
-        setWaypointB(null);
-        setNavRoutes([]);
-        setSelectedRouteIndex(0);
+        setWaypointB(lngLat);
+        setWaypointBLabel(coordLabel);
+        geocodeReverse(coord.lat, coord.lng).then((lbl) => { if (lbl) setWaypointBLabel(lbl); });
+        setPendingSlot(null);
       }
+      setNavRoutes([]);
+      setSelectedRouteIndex(0);
     },
-    [navMode]
+    []
   );
 
   const handleClear = useCallback(() => {
     setWaypointA(null);
     setWaypointB(null);
+    setWaypointALabel(null);
+    setWaypointBLabel(null);
     setNavRoutes([]);
     setSelectedRouteIndex(0);
     setNavError(null);
     setRouteSolarIntensity(null);
+    setPendingSlot(null);
   }, []);
 
   const handleToggleNavMode = useCallback(() => {
@@ -340,13 +402,61 @@ export default function Home() {
       if (prev) {
         setWaypointA(null);
         setWaypointB(null);
+        setWaypointALabel(null);
+        setWaypointBLabel(null);
         setNavRoutes([]);
         setSelectedRouteIndex(0);
         setNavError(null);
         setRouteSolarIntensity(null);
+        setPendingSlot(null);
       }
       return !prev;
     });
+  }, []);
+
+  const handleSetWaypointA = useCallback((coord: [number, number], label: string) => {
+    setWaypointA(coord);
+    setWaypointALabel(label);
+    setNavRoutes([]);
+    setSelectedRouteIndex(0);
+    const map = mapRef.current;
+    if (map) map.flyTo({ center: coord, zoom: Math.max(map.getZoom(), 15) });
+  }, []);
+
+  const handleSetWaypointB = useCallback((coord: [number, number], label: string) => {
+    setWaypointB(coord);
+    setWaypointBLabel(label);
+    setNavRoutes([]);
+    setSelectedRouteIndex(0);
+    const map = mapRef.current;
+    if (map) map.flyTo({ center: coord, zoom: Math.max(map.getZoom(), 15) });
+  }, []);
+
+  const handleSwapWaypoints = useCallback(() => {
+    const a = waypointARef.current;
+    const b = waypointBRef.current;
+    const aLabel = waypointALabelRef.current;
+    const bLabel = waypointBLabelRef.current;
+    setWaypointA(b);
+    setWaypointB(a);
+    setWaypointALabel(bLabel);
+    setWaypointBLabel(aLabel);
+    setNavRoutes([]);
+    setSelectedRouteIndex(0);
+  }, []);
+
+  const handleClearWaypointA = useCallback(() => {
+    setWaypointA(null);
+    setWaypointALabel(null);
+    setNavRoutes([]);
+    setSelectedRouteIndex(0);
+  }, []);
+
+  const handleClearWaypointB = useCallback(() => {
+    setWaypointB(null);
+    setWaypointBLabel(null);
+    setNavRoutes([]);
+    setSelectedRouteIndex(0);
   }, []);
 
   const calculateRoute = useCallback(async () => {
@@ -369,8 +479,9 @@ export default function Home() {
     let dijkstraMs = 0;
 
     try {
-      // 1. Bounding box with ~500m padding
-      const padding = 0.005;
+      // 1. Bounding box with adaptive padding (~0.3× straight-line, clamped 0.002°–0.004°)
+      const straightLineDistM = haversineMeters(a, b);
+      const padding = Math.max(0.002, Math.min(0.004, straightLineDistM / 111000 * 0.3));
       const south = Math.min(a[1], b[1]) - padding;
       const north = Math.max(a[1], b[1]) + padding;
       const west = Math.min(a[0], b[0]) - padding;
@@ -410,6 +521,23 @@ export default function Home() {
       const dpr = window.devicePixelRatio || 1;
       canvasReadMs = performance.now() - tCanvas;
 
+      // Build fast inline Mercator projection (avoids map.project() allocations per sample)
+      const _mX = (lng: number) => (lng + 180) / 360;
+      const _mY = (lat: number) => {
+        const s = Math.sin(lat * Math.PI / 180);
+        return 0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI);
+      };
+      const _scale = Math.pow(2, map.getZoom()) * 512;
+      const _mc = map.getCenter();
+      const _cx = _mX(_mc.lng) * _scale;
+      const _cy = _mY(_mc.lat) * _scale;
+      const _W2 = canvas.width / dpr / 2;
+      const _H2 = canvas.height / dpr / 2;
+      const projectFast = (lng: number, lat: number): [number, number] => [
+        _mX(lng) * _scale - _cx + _W2,
+        _mY(lat) * _scale - _cy + _H2,
+      ];
+
       // 4. Remove virtual nodes from a prior run on this cached graph.
       //    Done before shade sampling so the base graph is clean.
       for (const vid of [-1, -2]) {
@@ -441,14 +569,14 @@ export default function Home() {
           const hi = Math.max(fromId, edge.toId);
           const key = `${lo},${hi}`;
           if (edgeShadeCache.has(key)) continue;
-          // Sample density: ~1 sample per 12 m, minimum 5.
-          const samples = Math.max(5, Math.ceil(edge.distanceM / 12));
+          // Sample density: ~1 sample per 25 m, minimum 3.
+          const samples = Math.max(3, Math.ceil(edge.distanceM / 25));
           // Canonical from/to (low→high nodeId) for consistent left/right.
           const canonFrom: [number, number] = fromId < edge.toId
             ? [fromNode.lon, fromNode.lat] : [toNode.lon, toNode.lat];
           const canonTo: [number, number] = fromId < edge.toId
             ? [toNode.lon, toNode.lat] : [fromNode.lon, fromNode.lat];
-          edgeShadeCache.set(key, sampleBothSidewalks(map, imageData, dpr, canonFrom, canonTo, samples));
+          edgeShadeCache.set(key, sampleBothSidewalks(projectFast, imageData, dpr, canonFrom, canonTo, samples));
         }
       }
       shadeSampleMs = performance.now() - tShade;
@@ -495,7 +623,6 @@ export default function Home() {
       const midLat = (a[1] + b[1]) / 2;
       const midLng = (a[0] + b[0]) / 2;
       const solarIntensity = computeSolarIntensity(dateRef.current, midLat, midLng);
-      const straightLineDistM = haversineMeters(a, b);
       const CROSSING_PENALTY_M = 15; // ~15s wait at exposed intersection
       const opts = { crossingPenaltyM: CROSSING_PENALTY_M, solarIntensity, straightLineDistM };
 
@@ -571,6 +698,15 @@ export default function Home() {
         showSunLines={showSunLines}
       />
 
+      {/* Pending waypoint selection banner */}
+      {pendingSlot && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-30 pointer-events-none flex items-center gap-2 bg-black/80 backdrop-blur-md border border-amber-400/40 rounded-full px-4 py-1.5 text-sm text-amber-300 select-none">
+          <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse shrink-0" />
+          Click map to place waypoint {pendingSlot}
+          <span className="text-white/30 text-xs ml-1">— Esc to cancel</span>
+        </div>
+      )}
+
       {/* Top-left overlay: search */}
       <div className="absolute top-3 left-3 z-10 flex flex-col gap-2">
         <LocationSearch onSelect={flyTo} />
@@ -579,18 +715,50 @@ export default function Home() {
       {/* Full-width timeline ruler + controls */}
       {!accumulation.enabled && (
         <div className="absolute bottom-0 left-0 right-0 z-10 bg-black/70 backdrop-blur-sm border-t border-white/10">
-          <TimelineSlider
-            minutes={date.getHours() * 60 + date.getMinutes()}
-            onChange={handleSliderChange}
-            date={date}
-            latDeg={mapCenter?.[0]}
-            lngDeg={mapCenter?.[1]}
-          />
-          {/* Centered controls row: play · date · time */}
-          <div className="flex items-center justify-center gap-4 px-4 py-2">
+          {/* Floating tooltip — shows time in time mode, month name in month mode */}
+          <div
+            className="absolute left-1/2 -translate-x-1/2 flex flex-col items-center pointer-events-none z-20"
+            style={{ bottom: "calc(100% + 6px)" }}
+          >
+            <div className="bg-amber-500 text-black text-[11px] font-bold px-2.5 py-0.5 rounded-md tabular-nums shadow-md whitespace-nowrap">
+              {sliderMode === "time"
+                ? formatTime12h(date)
+                : date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+            </div>
+            <div
+              style={{
+                width: 0,
+                height: 0,
+                borderLeft: "5px solid transparent",
+                borderRight: "5px solid transparent",
+                borderTop: "5px solid #f59e0b",
+              }}
+            />
+          </div>
+
+          {/* Ruler — time or day of year */}
+          {sliderMode === "time" ? (
+            <TimelineSlider
+              minutes={date.getHours() * 60 + date.getMinutes()}
+              onChange={handleSliderChange}
+              date={date}
+              latDeg={mapCenter?.[0]}
+              lngDeg={mapCenter?.[1]}
+            />
+          ) : (
+            <DaySlider
+              dayOfYear={dateToDayOfYear(date)}
+              year={date.getFullYear()}
+              onChange={handleDayOfYearChange}
+            />
+          )}
+
+          {/* Controls row */}
+          <div className="flex items-center justify-center gap-3 px-4 py-2">
+            {/* Play/pause */}
             <button
               onClick={() => setIsPlaying((p) => !p)}
-              className="text-white/60 hover:text-amber-400 transition-colors flex items-center justify-center w-5 h-5"
+              className="text-white/60 hover:text-amber-400 transition-colors flex items-center justify-center w-11 h-11 rounded-lg hover:bg-white/5"
               title={isPlaying ? "Pause" : "Play"}
             >
               {isPlaying ? (
@@ -604,55 +772,116 @@ export default function Home() {
                 </svg>
               )}
             </button>
-            <input
-              type="date"
-              value={toDateInput(date)}
-              onChange={(e) => {
-                const [y, m, d] = e.target.value.split("-").map(Number);
-                const next = new Date(date);
-                next.setFullYear(y, m - 1, d);
-                setDate(next);
-              }}
-              className="bg-white/10 rounded px-2 py-1 text-white text-xs border border-white/10 focus:outline-none focus:border-white/30"
-            />
-            <TimeInput date={date} onChange={setDate} />
+
+            {/* Slider mode toggle — clock (time) / calendar (day) */}
+            <button
+              onClick={() => setSliderMode((m) => m === "time" ? "day" : "time")}
+              className="flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-white/[0.05] hover:bg-white/10 border border-white/[0.08] transition-colors"
+              title={sliderMode === "time" ? "Switch to day of year" : "Switch to time of day"}
+            >
+              {/* Clock icon */}
+              <svg
+                className={sliderMode === "time" ? "text-amber-400" : "text-white/30"}
+                width="12" height="12" viewBox="0 0 12 12" fill="none"
+                stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"
+              >
+                <circle cx="6" cy="6" r="5" />
+                <polyline points="6,3.5 6,6 7.5,7.5" />
+              </svg>
+              <span className="text-[9px] text-white/25">/</span>
+              {/* Calendar icon */}
+              <svg
+                className={sliderMode === "day" ? "text-amber-400" : "text-white/30"}
+                width="12" height="12" viewBox="0 0 12 12" fill="none"
+                stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
+              >
+                <rect x="1" y="2" width="10" height="9" rx="1" />
+                <line x1="1" y1="5" x2="11" y2="5" />
+                <line x1="4" y1="1" x2="4" y2="3" />
+                <line x1="8" y1="1" x2="8" y2="3" />
+              </svg>
+            </button>
+
+            {/* Date / time inputs (time mode) or year picker (day mode) */}
+            {sliderMode === "time" ? (
+              <>
+                <DateInput date={date} onChange={setDate} />
+                <TimeInput date={date} onChange={setDate} />
+              </>
+            ) : (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => adjustYear(-1)}
+                  className="text-white/50 hover:text-white/90 transition-colors w-9 h-9 flex items-center justify-center rounded-lg hover:bg-white/5"
+                  aria-label="Previous year"
+                >
+                  <svg width="6" height="10" viewBox="0 0 6 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <polyline points="5,1 1,5 5,9" />
+                  </svg>
+                </button>
+                <span className="text-white/70 text-sm tabular-nums w-12 text-center">
+                  {date.getFullYear()}
+                </span>
+                <button
+                  onClick={() => adjustYear(+1)}
+                  className="text-white/50 hover:text-white/90 transition-colors w-9 h-9 flex items-center justify-center rounded-lg hover:bg-white/5"
+                  aria-label="Next year"
+                >
+                  <svg width="6" height="10" viewBox="0 0 6 10" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <polyline points="1,1 5,5 1,9" />
+                  </svg>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
 
-      {/* Bottom-left overlay: accumulation + navigation + about link */}
-      <div className="absolute bottom-20 left-3 z-10 flex flex-col gap-2 items-start">
-        <AccumulationPanel
-          accumulation={accumulation}
-          onChange={setAccumulation}
-          getCanvas={getCanvas as () => HTMLCanvasElement | undefined}
-          getBounds={getBounds as () => { getWest(): number; getEast(): number; getNorth(): number; getSouth(): number } | undefined}
-        />
-        <SettingsPanel
-          showSunLines={showSunLines}
-          onShowSunLinesChange={setShowSunLines}
-        />
-        <NavigationPanel
-          navMode={navMode}
-          onToggleNavMode={handleToggleNavMode}
-          waypointA={waypointA}
-          waypointB={waypointB}
-          onClear={handleClear}
-          onCalculate={calculateRoute}
-          isCalculating={isCalculating}
-          routes={navRoutes}
-          selectedRouteIndex={selectedRouteIndex}
-          onSelectRoute={setSelectedRouteIndex}
-          error={navError}
-          solarIntensity={routeSolarIntensity}
-        />
-        <a
-          href="/about"
-          className="text-xs text-white/40 hover:text-white/70 transition-colors px-1"
-        >
-          About / API
-        </a>
+      {/* Bottom-right overlay: view tools */}
+      <div className="absolute bottom-20 right-3 z-10">
+        <div className="bg-black/60 backdrop-blur-sm rounded-xl border border-white/[0.07] p-1.5 flex flex-col gap-1">
+          <AccumulationPanel
+            accumulation={accumulation}
+            onChange={setAccumulation}
+            getCanvas={getCanvas as () => HTMLCanvasElement | undefined}
+            getBounds={getBounds as () => { getWest(): number; getEast(): number; getNorth(): number; getSouth(): number } | undefined}
+          />
+          <SettingsPanel
+            showSunLines={showSunLines}
+            onShowSunLinesChange={setShowSunLines}
+          />
+          <a
+            href="/about"
+            className="text-[10px] text-white/30 hover:text-white/60 transition-colors px-1.5 pt-0.5 pb-0.5"
+          >
+            About / API
+          </a>
+        </div>
       </div>
+      {/* Navigation sidebar — self-positions absolutely (see NavigationPanel) */}
+      <NavigationPanel
+        navMode={navMode}
+        onToggleNavMode={handleToggleNavMode}
+        waypointA={waypointA}
+        waypointB={waypointB}
+        waypointALabel={waypointALabel}
+        waypointBLabel={waypointBLabel}
+        onSetWaypointA={handleSetWaypointA}
+        onSetWaypointB={handleSetWaypointB}
+        onSwapWaypoints={handleSwapWaypoints}
+        onClearWaypointA={handleClearWaypointA}
+        onClearWaypointB={handleClearWaypointB}
+        onClear={handleClear}
+        onCalculate={calculateRoute}
+        isCalculating={isCalculating}
+        routes={navRoutes}
+        selectedRouteIndex={selectedRouteIndex}
+        onSelectRoute={setSelectedRouteIndex}
+        error={navError}
+        solarIntensity={routeSolarIntensity}
+        pendingSlot={pendingSlot}
+        onSetPendingSlot={setPendingSlot}
+      />
     </div>
   );
 }
