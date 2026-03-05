@@ -12,6 +12,8 @@ import DateInput from "./components/DateInput";
 import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
+import { fetchTransitStops } from "./lib/transit";
+import type { TransitStop } from "./lib/transit";
 import { geocodeReverse } from "./lib/nominatim";
 import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, bfsReachable, snapToReachableEdge, RouteOption } from "./lib/routing";
 import type { GraphEdge, RoutingGraph } from "./lib/routing";
@@ -240,6 +242,15 @@ export default function Home() {
   const [pendingSlot, setPendingSlot] = useState<'A' | 'B' | null>(null);
   const pendingSlotRef = useRef<'A' | 'B' | null>(null);
   pendingSlotRef.current = pendingSlot;
+
+  // Transit state
+  const [showTransit, setShowTransit]           = useState(false);
+  const [transitStops, setTransitStops]         = useState<TransitStop[]>([]);
+  const [transitPopupStop, setTransitPopupStop] = useState<TransitStop | null>(null);
+  const showTransitRef   = useRef(showTransit);
+  showTransitRef.current = showTransit;
+  const transitStopsRef   = useRef<TransitStop[]>(transitStops);
+  transitStopsRef.current = transitStops;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [sliderMode, setSliderMode] = useState<"time" | "day">("time");
@@ -811,6 +822,27 @@ export default function Home() {
     }
   }, []);
 
+  const fetchTransitForViewport = useCallback(async () => {
+    const map = mapRef.current;
+    if (!map || !showTransitRef.current) return;
+    // Time-of-day gate: no transit midnight–5 AM map-local time
+    const localHours = toMapLocal(dateRef.current, mapUtcOffsetMinRef.current).hours;
+    if (localHours < 5) { setTransitStops([]); return; }
+    const b = map.getBounds();
+    const stops = await fetchTransitStops(b.getSouth(), b.getWest(), b.getNorth(), b.getEast());
+    if (showTransitRef.current) setTransitStops(stops);
+  }, []);
+
+  useEffect(() => {
+    if (!showTransit) { setTransitStops([]); return; }
+    fetchTransitForViewport();
+    const map = mapRef.current;
+    if (!map) return;
+    const handler = () => fetchTransitForViewport();
+    map.on("moveend", handler);
+    return () => { map.off("moveend", handler); };
+  }, [showTransit, fetchTransitForViewport]);
+
   const selectedNavRoute = navRoutes[selectedRouteIndex]?.geojson ?? null;
 
   const { hours: _localH, minutes: _localM, year: _localYear } = toMapLocal(date, mapUtcOffsetMin);
@@ -829,6 +861,9 @@ export default function Home() {
         showSunLines={showSunLines}
         mapClickActive={pendingSlot !== null}
         onMarkerDragEnd={handleMarkerDragEnd}
+        transitStops={transitStops}
+        showTransitStops={showTransit}
+        onTransitStopClick={setTransitPopupStop}
       />
 
       {/* Pending waypoint selection banner */}
@@ -1019,6 +1054,10 @@ export default function Home() {
         pendingSlot={pendingSlot}
         onSetPendingSlot={setPendingSlot}
         locationSearchSlot={navMode ? <LocationSearch onSelect={flyTo} /> : undefined}
+        showTransit={showTransit}
+        onToggleTransit={() => setShowTransit((t) => !t)}
+        transitPopupStop={transitPopupStop}
+        onDismissTransitPopup={() => setTransitPopupStop(null)}
       />
     </div>
   );
