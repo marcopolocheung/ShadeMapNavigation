@@ -13,9 +13,12 @@ import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
 import { geocodeReverse } from "./lib/nominatim";
-import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, RouteOption } from "./lib/routing";
+import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, bfsReachable, snapToReachableEdge, RouteOption } from "./lib/routing";
 import type { GraphEdge, RoutingGraph } from "./lib/routing";
 import { recordRoutingRun, computeDerivedKpis } from "./lib/metrics";
+import { snapOutsideBuilding } from "./lib/building-snap";
+import type { MapBuildingQuery } from "./lib/building-snap";
+import { longitudeToUtcOffsetMin, toMapLocal, fromMapLocal } from "./lib/timezone";
 
 // MapView is client-only (uses browser APIs); skip SSR entirely
 const MapView = dynamic(() => import("./components/MapView"), { ssr: false });
@@ -26,20 +29,11 @@ function todayAt(hours: number): Date {
   return d;
 }
 
-function formatTime12h(d: Date): string {
-  let h = d.getHours();
-  const m = d.getMinutes();
-  const ampm = h >= 12 ? "PM" : "AM";
-  h = h % 12 || 12;
+function formatTime12h(d: Date, utcOffsetMin: number): string {
+  const { hours: h24, minutes: m } = toMapLocal(d, utcOffsetMin);
+  const ampm = h24 >= 12 ? "PM" : "AM";
+  const h = h24 % 12 || 12;
   return `${h}:${String(m).padStart(2, "0")} ${ampm}`;
-}
-
-function toDateInput(d: Date): string {
-  return [
-    d.getFullYear(),
-    String(d.getMonth() + 1).padStart(2, "0"),
-    String(d.getDate()).padStart(2, "0"),
-  ].join("-");
 }
 
 /**
@@ -68,19 +62,21 @@ function parseTime(s: string): number | null {
   return h * 60 + m;
 }
 
-function dateToDayOfYear(d: Date): number {
-  const start = new Date(d.getFullYear(), 0, 1);
-  return Math.floor((d.getTime() - start.getTime()) / 86400000);
+function dateToDayOfYear(d: Date, utcOffsetMin: number): number {
+  const { year, month, day } = toMapLocal(d, utcOffsetMin);
+  return Math.floor(
+    (Date.UTC(year, month, day) - Date.UTC(year, 0, 1)) / 86400000
+  );
 }
 
-function TimeInput({ date, onChange }: { date: Date; onChange: (d: Date) => void }) {
+function TimeInput({ date, onChange, utcOffsetMin }: { date: Date; onChange: (d: Date) => void; utcOffsetMin: number }) {
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState("");
   const shouldCommit = useRef(true);
 
   function startEdit() {
     shouldCommit.current = true;
-    setText(formatTime12h(date));
+    setText(formatTime12h(date, utcOffsetMin));
     setEditing(true);
   }
 
@@ -92,8 +88,7 @@ function TimeInput({ date, onChange }: { date: Date; onChange: (d: Date) => void
     setEditing(false);
     const mins = parseTime(val);
     if (mins !== null) {
-      const next = new Date(date);
-      next.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+      const next = fromMapLocal(date, utcOffsetMin, Math.floor(mins / 60), mins % 60);
       onChange(next);
     }
   }
@@ -123,7 +118,7 @@ function TimeInput({ date, onChange }: { date: Date; onChange: (d: Date) => void
       className="text-white/70 hover:text-white/90 text-xs tabular-nums w-20 text-center rounded px-2 py-1 hover:bg-white/10 transition-colors"
       title="Click to type a time (e.g. 6:30 AM, 14:30)"
     >
-      {formatTime12h(date)}
+      {formatTime12h(date, utcOffsetMin)}
     </button>
   );
 }
@@ -253,12 +248,19 @@ export default function Home() {
   // Map center for passing to the timeline slider's sunrise/sunset calculation
   const [mapCenter, setMapCenter] = useState<[number, number] | null>(null);
 
+  const [mapUtcOffsetMin, setMapUtcOffsetMin] = useState<number>(
+    () => -new Date().getTimezoneOffset()
+  );
+  const mapUtcOffsetMinRef = useRef(mapUtcOffsetMin);
+  mapUtcOffsetMinRef.current = mapUtcOffsetMin;
+
   // Hold the map instance in a ref so changes don't trigger re-renders
   const mapRef = useRef<maplibregl.Map | null>(null);
 
   // Refs so imperative callbacks always see current values without re-creating
   const waypointARef = useRef(waypointA);
   const waypointBRef = useRef(waypointB);
+  const calcGenRef = useRef(0); // incremented on every waypoint-clear to cancel in-flight calculations
   const waypointALabelRef = useRef(waypointALabel);
   const waypointBLabelRef = useRef(waypointBLabel);
   const dateRef = useRef(date);
@@ -275,21 +277,20 @@ export default function Home() {
     if (isPlaying) {
       animTimerRef.current = setInterval(() => {
         setDate((prev) => {
-          const next = new Date(prev);
+          const offsetMin = mapUtcOffsetMinRef.current;
           if (sliderModeRef.current === "day") {
-            const doy = dateToDayOfYear(prev);
-            const yr = prev.getFullYear();
+            const { year: yr, hours, minutes } = toMapLocal(prev, offsetMin);
+            const doy = dateToDayOfYear(prev, offsetMin);
             const isLeap = (yr % 4 === 0 && yr % 100 !== 0) || yr % 400 === 0;
             const nextDoy = (doy + 1) % (isLeap ? 366 : 365);
-            const start = new Date(yr, 0, 1);
-            const advanced = new Date(start.getTime() + nextDoy * 86400000);
-            advanced.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
-            return advanced;
+            return new Date(
+              Date.UTC(yr, 0, 1) + nextDoy * 86400000 - offsetMin * 60000 + (hours * 60 + minutes) * 60000
+            );
           } else {
-            const total = prev.getHours() * 60 + prev.getMinutes() + 2;
-            next.setHours(Math.floor(total / 60) % 24, total % 60, 0, 0);
+            const { hours, minutes } = toMapLocal(prev, offsetMin);
+            const totalMins = (hours * 60 + minutes + 2) % 1440;
+            return fromMapLocal(prev, offsetMin, Math.floor(totalMins / 60), totalMins % 60);
           }
-          return next;
         });
       }, 50);
     } else {
@@ -315,40 +316,51 @@ export default function Home() {
     mapRef.current = map;
     const { lat, lng } = map.getCenter();
     setMapCenter([lat, lng]);
+    const initialOffset = longitudeToUtcOffsetMin(lng);
+    setMapUtcOffsetMin(initialOffset);
+    setDate(new Date());
     map.on("moveend", () => {
       const c = map.getCenter();
       setMapCenter([c.lat, c.lng]);
+      setMapUtcOffsetMin(longitudeToUtcOffsetMin(c.lng));
     });
   }, []);
 
   const handleSliderChange = useCallback((m: number) => {
     setDate((prev) => {
-      if (prev.getHours() * 60 + prev.getMinutes() === m) return prev;
-      const next = new Date(prev);
-      next.setHours(Math.floor(m / 60), m % 60, 0, 0);
-      return next;
+      const offsetMin = mapUtcOffsetMinRef.current;
+      const { hours, minutes } = toMapLocal(prev, offsetMin);
+      if (hours * 60 + minutes === m) return prev;
+      return fromMapLocal(prev, offsetMin, Math.floor(m / 60), m % 60);
     });
   }, []);
 
   const handleDayOfYearChange = useCallback((day: number) => {
     setDate((prev) => {
-      const start = new Date(prev.getFullYear(), 0, 1);
-      const next = new Date(start.getTime() + day * 86400000);
-      next.setHours(prev.getHours(), prev.getMinutes(), 0, 0);
-      return next;
+      const offsetMin = mapUtcOffsetMinRef.current;
+      const { year, hours, minutes } = toMapLocal(prev, offsetMin);
+      return new Date(
+        Date.UTC(year, 0, 1) + day * 86400000 - offsetMin * 60000 + (hours * 60 + minutes) * 60000
+      );
     });
   }, []);
 
   const adjustYear = useCallback((delta: number) => {
     setDate((prev) => {
-      const next = new Date(prev);
-      next.setFullYear(prev.getFullYear() + delta);
-      return next;
+      const offsetMin = mapUtcOffsetMinRef.current;
+      const { year, month, day, hours, minutes } = toMapLocal(prev, offsetMin);
+      return new Date(
+        Date.UTC(year + delta, month, day) - offsetMin * 60000 + (hours * 60 + minutes) * 60000
+      );
     });
   }, []);
 
   const flyTo = useCallback((center: [number, number], zoom: number) => {
     mapRef.current?.flyTo({ center, zoom });
+    // center is [lng, lat]
+    const newOffset = longitudeToUtcOffsetMin(center[0]);
+    setMapUtcOffsetMin(newOffset);
+    setDate(new Date());
   }, []);
 
   const getCanvas = useCallback(
@@ -386,6 +398,8 @@ export default function Home() {
   );
 
   const handleClear = useCallback(() => {
+    calcGenRef.current++;
+    setIsCalculating(false);
     setWaypointA(null);
     setWaypointB(null);
     setWaypointALabel(null);
@@ -446,6 +460,8 @@ export default function Home() {
   }, []);
 
   const handleClearWaypointA = useCallback(() => {
+    calcGenRef.current++;
+    setIsCalculating(false);
     setWaypointA(null);
     setWaypointALabel(null);
     setNavRoutes([]);
@@ -472,6 +488,8 @@ export default function Home() {
   );
 
   const handleClearWaypointB = useCallback(() => {
+    calcGenRef.current++;
+    setIsCalculating(false);
     setWaypointB(null);
     setWaypointBLabel(null);
     setNavRoutes([]);
@@ -479,15 +497,28 @@ export default function Home() {
   }, []);
 
   const calculateRoute = useCallback(async () => {
-    const a = waypointARef.current;
-    const b = waypointBRef.current;
-    if (!a || !b) return;
+    const rawA = waypointARef.current;
+    const rawB = waypointBRef.current;
+    if (!rawA || !rawB) return;
     const map = mapRef.current;
     if (!map) {
       setNavError("Map not ready");
       return;
     }
 
+    // Snap waypoints to outside any building they may be inside, so the routing
+    // bbox always covers the streets around the building and snapToEdge finds a
+    // nearby road rather than one on the far side of the structure.
+    const a = snapOutsideBuilding(rawA, map as unknown as MapBuildingQuery);
+    const b = snapOutsideBuilding(rawB, map as unknown as MapBuildingQuery);
+    if (process.env.NODE_ENV !== "production") {
+      if (a[0] !== rawA[0] || a[1] !== rawA[1])
+        console.log(`[routing] waypoint A snapped out of building: [${rawA}] → [${a}]`);
+      if (b[0] !== rawB[0] || b[1] !== rawB[1])
+        console.log(`[routing] waypoint B snapped out of building: [${rawB}] → [${b}]`);
+    }
+
+    const myGen = ++calcGenRef.current;
     setIsCalculating(true);
     setNavError(null);
 
@@ -500,42 +531,54 @@ export default function Home() {
     try {
       // 1. Bounding box with adaptive padding (~0.3× straight-line, clamped 0.002°–0.004°)
       const straightLineDistM = haversineMeters(a, b);
-      const padding = Math.max(0.002, Math.min(0.004, straightLineDistM / 111000 * 0.3));
+      // Minimum 0.005° (~555 m) ensures streets on all sides of large buildings
+      // (e.g. Palazzo Vecchio) are always included even when a waypoint is
+      // placed inside the building footprint.
+      const padding = Math.max(0.005, Math.min(0.008, straightLineDistM / 111000 * 0.3));
       const south = Math.min(a[1], b[1]) - padding;
       const north = Math.max(a[1], b[1]) + padding;
       const west = Math.min(a[0], b[0]) - padding;
       const east = Math.max(a[0], b[0]) + padding;
 
-      // 2. Fetch road graph and fit viewport in parallel.
-      //    fitBounds ensures every edge in the routing bbox is on-screen when
-      //    we sample the canvas — eliminating the off-screen shadeFactor=0 bug.
-      //    Both operations are independent so we race them together.
+      // 2. Fetch road graph; fit viewport only when the route bbox isn't already
+      //    fully visible. fitBounds + map.once("idle") waits for all tiles to load
+      //    before canvas capture — this is necessary to avoid shadeFactor=0 on
+      //    off-screen edges, but is expensive when tiles are already present.
+      //    Skipping it when the bbox is already visible saves 5–30 s per call.
       const tFetch = performance.now();
+      const currentBounds = map.getBounds();
+      const bboxInView =
+        currentBounds.getWest()  <= west  &&
+        currentBounds.getEast()  >= east  &&
+        currentBounds.getSouth() <= south &&
+        currentBounds.getNorth() >= north;
+
       const [graph] = await Promise.all([
         fetchRoutingGraph(south, west, north, east),
-        new Promise<void>((resolve) => {
-          map.fitBounds(
-            [[west, south], [east, north]] as [[number, number], [number, number]],
-            { padding: 50, duration: 0 }
-          );
-          map.once("idle", resolve);
-        }),
+        bboxInView
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => {
+              map.fitBounds(
+                [[west, south], [east, north]] as [[number, number], [number, number]],
+                { padding: 50, duration: 0 }
+              );
+              map.once("idle", resolve);
+            }),
       ]);
       graphFetchMs = performance.now() - tFetch;
 
-      // 3. Read canvas once for shade sampling
+      // 3. Read canvas once for shade sampling.
+      //    With preserveDrawingBuffer:true the WebGL framebuffer is stable;
+      //    drawImage transfers it directly to a 2D canvas without the
+      //    toBlob → PNG-encode → createImageBitmap → PNG-decode round-trip
+      //    that was adding 1–3 s on retina displays.
       const tCanvas = performance.now();
       const canvas = map.getCanvas();
-      const blob = await new Promise<Blob | null>((res) =>
-        canvas.toBlob(res)
-      );
-      if (!blob) throw new Error("Canvas read failed — WebGL context may be lost");
-      const bmp = await createImageBitmap(blob);
       const tmp = document.createElement("canvas");
       tmp.width = canvas.width;
       tmp.height = canvas.height;
       const ctx2d = tmp.getContext("2d")!;
-      ctx2d.drawImage(bmp, 0, 0);
+      ctx2d.drawImage(canvas, 0, 0);
       const imageData = ctx2d.getImageData(0, 0, tmp.width, tmp.height);
       const dpr = window.devicePixelRatio || 1;
       canvasReadMs = performance.now() - tCanvas;
@@ -637,6 +680,71 @@ export default function Home() {
       // snapToEdge inserts virtual nodes into routingAdj (not graph.adj).
       const startId = snapToEdge(a, routingGraph, -1);
       const endId   = snapToEdge(b, routingGraph, -2);
+      if (process.env.NODE_ENV !== "production") {
+        const snapA = routingGraph.nodes.get(startId);
+        const snapB = routingGraph.nodes.get(endId);
+        if (snapA) console.log(`[routing] A [${a}] snapped to road at [${snapA.lon},${snapA.lat}] (${haversineMeters(a, [snapA.lon, snapA.lat]).toFixed(1)} m)`);
+        if (snapB) console.log(`[routing] B [${b}] snapped to road at [${snapB.lon},${snapB.lat}] (${haversineMeters(b, [snapB.lon, snapB.lat]).toFixed(1)} m)`);
+      }
+
+      // Connectivity fallback: if a waypoint snapped to a dead-end segment
+      // (e.g. an OSM path inside a walled courtyard, disconnected from the
+      // street network), re-snap to the nearest REACHABLE edge instead.
+      const removeVirtual = (vid: number) => {
+        routingGraph.nodes.delete(vid);
+        routingGraph.adj.delete(vid);
+        for (const edges of routingGraph.adj.values()) {
+          const i = edges.findIndex((e) => e.toId === vid);
+          if (i !== -1) edges.splice(i, 1);
+        }
+      };
+
+      const MAX_SNAP_DIST_M = 100;
+      let effectiveStartId = startId;
+      let effectiveEndId   = endId;
+
+      const reachableFromEnd = bfsReachable(routingGraph, endId);
+      if (!reachableFromEnd.has(startId)) {
+        removeVirtual(-1);
+        const fallback = snapToReachableEdge(a, routingGraph, reachableFromEnd, -1);
+        if (!fallback) {
+          throw new Error(
+            "The start point is in an area with no walkable streets nearby. Move it to a street or public footpath."
+          );
+        }
+        if (fallback.distM > MAX_SNAP_DIST_M) {
+          throw new Error(
+            `The start point is ${Math.round(fallback.distM)} m from the nearest walkable street. Move it closer to a street.`
+          );
+        }
+        effectiveStartId = fallback.id;
+        if (process.env.NODE_ENV !== "production") {
+          const sn = routingGraph.nodes.get(effectiveStartId);
+          if (sn) console.log(`[routing] A re-snapped to connected road at [${sn.lon},${sn.lat}] (${fallback.distM.toFixed(1)} m)`);
+        }
+      }
+
+      // Check end is also reachable (handles the symmetric case where B is isolated).
+      const reachableFromStart = bfsReachable(routingGraph, effectiveStartId);
+      if (!reachableFromStart.has(effectiveEndId)) {
+        removeVirtual(-2);
+        const fallback = snapToReachableEdge(b, routingGraph, reachableFromStart, -2);
+        if (!fallback) {
+          throw new Error(
+            "The destination is in an area with no walkable streets nearby. Move it to a street or public footpath."
+          );
+        }
+        if (fallback.distM > MAX_SNAP_DIST_M) {
+          throw new Error(
+            `The destination is ${Math.round(fallback.distM)} m from the nearest walkable street. Move it closer to a street.`
+          );
+        }
+        effectiveEndId = fallback.id;
+        if (process.env.NODE_ENV !== "production") {
+          const sn = routingGraph.nodes.get(effectiveEndId);
+          if (sn) console.log(`[routing] B re-snapped to connected road at [${sn.lon},${sn.lat}] (${fallback.distM.toFixed(1)} m)`);
+        }
+      }
 
       // 7. Compute solar context and run adaptive Dijkstra.
       const midLat = (a[1] + b[1]) / 2;
@@ -645,7 +753,7 @@ export default function Home() {
       const CROSSING_PENALTY_M = 15; // ~15s wait at exposed intersection
       const opts = { crossingPenaltyM: CROSSING_PENALTY_M, solarIntensity, straightLineDistM };
 
-      const paretoResults = paretoRoutes(routingGraph, startId, endId, opts);
+      const paretoResults = paretoRoutes(routingGraph, effectiveStartId, effectiveEndId, opts);
       dijkstraMs = performance.now() - tDijkstra;
 
       // Assign labels: Pareto returns [shortest, knee/balanced, mostShaded] deduplicated.
@@ -691,7 +799,8 @@ export default function Home() {
         pathLengthDeltaPct,
       });
 
-      // 8. Update state
+      // 8. Update state — bail if a waypoint was removed while we were computing
+      if (calcGenRef.current !== myGen) return;
       setNavRoutes(options);
       setSelectedRouteIndex(0);
       setRouteSolarIntensity(solarIntensity);
@@ -703,6 +812,9 @@ export default function Home() {
   }, []);
 
   const selectedNavRoute = navRoutes[selectedRouteIndex]?.geojson ?? null;
+
+  const { hours: _localH, minutes: _localM, year: _localYear } = toMapLocal(date, mapUtcOffsetMin);
+  const mapLocalMins = _localH * 60 + _localM;
 
   return (
     <div className="relative w-screen h-screen overflow-hidden bg-[#0a0a0a]">
@@ -745,8 +857,9 @@ export default function Home() {
           >
             <div className="bg-amber-500 text-black text-[11px] font-bold px-2.5 py-0.5 rounded-md tabular-nums shadow-md whitespace-nowrap">
               {sliderMode === "time"
-                ? formatTime12h(date)
-                : date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+                ? formatTime12h(date, mapUtcOffsetMin)
+                : new Date(date.getTime() + mapUtcOffsetMin * 60000)
+                    .toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" })}
             </div>
             <div
               style={{
@@ -762,16 +875,17 @@ export default function Home() {
           {/* Ruler — time or day of year */}
           {sliderMode === "time" ? (
             <TimelineSlider
-              minutes={date.getHours() * 60 + date.getMinutes()}
+              minutes={mapLocalMins}
               onChange={handleSliderChange}
               date={date}
               latDeg={mapCenter?.[0]}
               lngDeg={mapCenter?.[1]}
+              utcOffsetMin={mapUtcOffsetMin}
             />
           ) : (
             <DaySlider
-              dayOfYear={dateToDayOfYear(date)}
-              year={date.getFullYear()}
+              dayOfYear={dateToDayOfYear(date, mapUtcOffsetMin)}
+              year={_localYear}
               onChange={handleDayOfYearChange}
             />
           )}
@@ -828,8 +942,8 @@ export default function Home() {
             {/* Date / time inputs (time mode) or year picker (day mode) */}
             {sliderMode === "time" ? (
               <>
-                <DateInput date={date} onChange={setDate} />
-                <TimeInput date={date} onChange={setDate} />
+                <DateInput date={date} onChange={setDate} utcOffsetMin={mapUtcOffsetMin} />
+                <TimeInput date={date} onChange={setDate} utcOffsetMin={mapUtcOffsetMin} />
               </>
             ) : (
               <div className="flex items-center gap-1">
@@ -843,7 +957,7 @@ export default function Home() {
                   </svg>
                 </button>
                 <span className="text-white/70 text-sm tabular-nums w-12 text-center">
-                  {date.getFullYear()}
+                  {_localYear}
                 </span>
                 <button
                   onClick={() => adjustYear(+1)}
