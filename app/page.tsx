@@ -14,6 +14,7 @@ import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
 import { fetchTransitStops } from "./lib/transit";
 import type { TransitStop } from "./lib/transit";
+import { findBestHybridCandidate, hybridCandidateToRouteOption } from "./lib/hybrid-routing";
 import { geocodeReverse } from "./lib/nominatim";
 import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, bfsReachable, snapToReachableEdge, RouteOption } from "./lib/routing";
 import type { GraphEdge, RoutingGraph } from "./lib/routing";
@@ -785,6 +786,36 @@ export default function Home() {
           "No walkable path found between the selected points. Try points on connected streets."
         );
 
+      // Hybrid route (only when transit toggle is on and stops are available)
+      if (showTransitRef.current && transitStopsRef.current.length >= 2) {
+        const { hours: mapHour } = toMapLocal(dateRef.current, mapUtcOffsetMinRef.current);
+        const candidate = findBestHybridCandidate({
+          a,
+          b,
+          stops: transitStopsRef.current,
+          walkRoutes: options,
+          mapLocalHour: mapHour,
+        });
+        if (candidate) {
+          const hybridOption = hybridCandidateToRouteOption(candidate);
+          // Stitch full geometry: A → board → alight → B
+          hybridOption.geojson = {
+            type: "Feature",
+            properties: { isTransit: true },
+            geometry: {
+              type: "LineString",
+              coordinates: [
+                [a[0], a[1]],
+                [candidate.boardStop.lon, candidate.boardStop.lat],
+                [candidate.alightStop.lon, candidate.alightStop.lat],
+                [b[0], b[1]],
+              ],
+            },
+          };
+          options.push(hybridOption);
+        }
+      }
+
       // 7. Record metrics before updating state
       const routeSnapshots = options.map((o) => ({
         label: o.label,
@@ -842,6 +873,16 @@ export default function Home() {
     map.on("moveend", handler);
     return () => { map.off("moveend", handler); };
   }, [showTransit, fetchTransitForViewport]);
+
+  // Strip hybrid route cards when transit is toggled off
+  useEffect(() => {
+    if (showTransit) return;
+    setNavRoutes((prev) => {
+      const filtered = prev.filter((r) => !r.transitLeg);
+      if (filtered.length !== prev.length) setSelectedRouteIndex(0);
+      return filtered;
+    });
+  }, [showTransit]);
 
   const selectedNavRoute = navRoutes[selectedRouteIndex]?.geojson ?? null;
 
