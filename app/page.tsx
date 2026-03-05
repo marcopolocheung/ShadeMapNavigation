@@ -885,6 +885,14 @@ export default function Home() {
   }, [showTransit]);
 
   const selectedNavRoute = navRoutes[selectedRouteIndex]?.geojson ?? null;
+  const selectedRoute = navRoutes[selectedRouteIndex];
+  const navTransitLeg = selectedRoute?.transitLeg
+    ? {
+        boardLngLat:  [selectedRoute.transitLeg.boardStop.lon,  selectedRoute.transitLeg.boardStop.lat]  as [number, number],
+        alightLngLat: [selectedRoute.transitLeg.alightStop.lon, selectedRoute.transitLeg.alightStop.lat] as [number, number],
+        mode: selectedRoute.transitLeg.boardStop.mode,
+      }
+    : null;
 
   const { hours: _localH, minutes: _localM, year: _localYear } = toMapLocal(date, mapUtcOffsetMin);
   const mapLocalMins = _localH * 60 + _localM;
@@ -905,6 +913,7 @@ export default function Home() {
         transitStops={transitStops}
         showTransitStops={showTransit}
         onTransitStopClick={setTransitPopupStop}
+        navTransitLeg={navTransitLeg}
       />
 
       {/* Pending waypoint selection banner */}

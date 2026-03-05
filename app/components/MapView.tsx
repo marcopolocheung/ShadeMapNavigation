@@ -25,6 +25,7 @@ interface MapViewProps {
   transitStops?: TransitStop[];
   showTransitStops?: boolean;
   onTransitStopClick?: (stop: TransitStop) => void;
+  navTransitLeg?: { boardLngLat: [number, number]; alightLngLat: [number, number]; mode: string } | null;
 }
 
 const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_API_KEY ?? "";
@@ -145,6 +146,7 @@ export default function MapView({
   transitStops,
   showTransitStops,
   onTransitStopClick,
+  navTransitLeg,
 }: MapViewProps) {
   const containerRef    = useRef<HTMLDivElement>(null);
   const mapRef          = useRef<maplibregl.Map | null>(null);
@@ -510,6 +512,48 @@ export default function MapView({
       })),
     });
   }, [transitStops, showTransitStops]);
+
+  // -------------------------------------------------------------------------
+  // Transit leg dashed overlay (selected hybrid route)
+  // -------------------------------------------------------------------------
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !map.isStyleLoaded()) return;
+
+    if (navTransitLeg) {
+      const data: GeoJSON.FeatureCollection = {
+        type: "FeatureCollection",
+        features: [{
+          type: "Feature",
+          properties: { mode: navTransitLeg.mode },
+          geometry: { type: "LineString", coordinates: [navTransitLeg.boardLngLat, navTransitLeg.alightLngLat] },
+        }],
+      };
+      if (!map.getSource("transit-leg")) {
+        map.addSource("transit-leg", { type: "geojson", data });
+        map.addLayer({
+          id: "transit-leg-line",
+          type: "line",
+          source: "transit-leg",
+          paint: {
+            "line-color": [
+              "match", ["get", "mode"],
+              "subway", "#0070c9", "rail", "#ef4444", "tram", "#a855f7", "bus", "#22c55e", "ferry", "#06b6d4",
+              "#ffffff",
+            ],
+            "line-width": 5,
+            "line-opacity": 0.9,
+            "line-dasharray": [4, 2],
+          },
+        });
+      } else {
+        (map.getSource("transit-leg") as maplibregl.GeoJSONSource).setData(data);
+      }
+    } else {
+      if (map.getLayer("transit-leg-line")) map.removeLayer("transit-leg-line");
+      if (map.getSource("transit-leg"))     map.removeSource("transit-leg");
+    }
+  }, [navTransitLeg]);
 
   // -------------------------------------------------------------------------
   // Sun compass SVG
