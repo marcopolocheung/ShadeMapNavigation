@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from "react";
 import type { RouteOption } from "../lib/routing";
 import { geocodeForward, type NominatimResult } from "../lib/nominatim";
+import type { TransitStop, TransitMode } from "../lib/transit";
+import { TRANSIT_MODE_COLOR } from "../lib/transit";
 
 export interface NavigationPanelProps {
   navMode: boolean;
@@ -27,6 +29,10 @@ export interface NavigationPanelProps {
   pendingSlot: 'A' | 'B' | null;
   onSetPendingSlot: (slot: 'A' | 'B' | null) => void;
   locationSearchSlot?: React.ReactNode;
+  showTransit?: boolean;
+  onToggleTransit?: () => void;
+  transitPopupStop?: TransitStop | null;
+  onDismissTransitPopup?: () => void;
 }
 
 function formatDist(m: number): string {
@@ -253,6 +259,10 @@ export default function NavigationPanel({
   pendingSlot,
   onSetPendingSlot,
   locationSearchSlot,
+  showTransit,
+  onToggleTransit,
+  transitPopupStop,
+  onDismissTransitPopup,
 }: NavigationPanelProps) {
   const [collapsed, setCollapsed] = useState(false);
 
@@ -395,6 +405,44 @@ export default function NavigationPanel({
                 Clear
               </button>
             </div>
+
+            {/* Transit toggle */}
+            {onToggleTransit && (
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={onToggleTransit}
+                  className={`flex-1 px-2 py-1.5 rounded text-xs font-medium border transition-colors flex items-center justify-center gap-1.5 ${
+                    showTransit
+                      ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300"
+                      : "border-white/10 text-white/50 hover:text-white/80 hover:border-white/25"
+                  }`}
+                  title={showTransit ? "Hide transit stops" : "Show transit stops"}
+                >
+                  <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor" aria-hidden="true">
+                    <rect x="1" y="1" width="9" height="7" rx="1.5" />
+                    <circle cx="3" cy="9.5" r="1" />
+                    <circle cx="8" cy="9.5" r="1" />
+                  </svg>
+                  {showTransit ? "Transit on" : "Show Transit"}
+                </button>
+              </div>
+            )}
+
+            {/* Transit stop popup */}
+            {transitPopupStop && (
+              <div className="flex flex-col gap-0.5 rounded border border-white/10 bg-white/[0.04] p-2 text-xs shrink-0">
+                <div className="flex items-center justify-between">
+                  <span className="text-white/70 font-medium truncate">{transitPopupStop.name || "(unnamed stop)"}</span>
+                  <button onClick={onDismissTransitPopup} className="text-white/30 hover:text-white/70 ml-1 shrink-0" aria-label="Close">×</button>
+                </div>
+                <div className="flex items-center gap-1 mt-0.5">
+                  <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: TRANSIT_MODE_COLOR[transitPopupStop.mode as TransitMode] }} />
+                  <span className="text-white/40 capitalize">{transitPopupStop.mode}</span>
+                  <span className="text-white/20 mx-1">·</span>
+                  <span className="text-white/30 tabular-nums">{transitPopupStop.lat.toFixed(4)}, {transitPopupStop.lon.toFixed(4)}</span>
+                </div>
+              </div>
+            )}
 
             {/* Route cards */}
             {routes.length > 0 && (
