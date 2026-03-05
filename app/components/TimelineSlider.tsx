@@ -104,6 +104,9 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
   curMin.current = minutes;
 
   const inertiaFrame = useRef<number | null>(null);
+  // Throttle: only call onChange at most every ~16 ms (≈60 fps) to avoid
+  // overwhelming React with rapid state updates during drag/inertia.
+  const lastOnChangeMs = useRef(0);
 
   const getTranslateX = useCallback((m: number): number => {
     const half = (containerRef.current?.clientWidth ?? 0) / 2;
@@ -153,7 +156,10 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
 
         fracMin.current = next;
         applyTranslate(next);
-        onChange(Math.round(next));
+        if (now - lastOnChangeMs.current >= 16) {
+          lastOnChangeMs.current = now;
+          onChange(Math.round(next));
+        }
         inertiaFrame.current = requestAnimationFrame(tick);
       };
 
@@ -187,6 +193,7 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
       lastX.current = e.clientX;
       lastMoveTime.current = performance.now();
       lastVelocity.current = 0;
+      lastOnChangeMs.current = 0; // ensure first move fires immediately
       e.currentTarget.setPointerCapture(e.pointerId);
     },
     [cancelInertia]
@@ -206,18 +213,24 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
 
       fracMin.current = Math.max(0, Math.min(1439, fracMin.current - dx / PX_PER_MIN));
       applyTranslate(fracMin.current);
-      onChange(Math.round(fracMin.current));
+      if (now - lastOnChangeMs.current >= 16) {
+        lastOnChangeMs.current = now;
+        onChange(Math.round(fracMin.current));
+      }
     },
     [applyTranslate, onChange]
   );
 
   const onPointerUp = useCallback(() => {
     isDragging.current = false;
+    // Always flush the final drag position to React state
+    lastOnChangeMs.current = 0;
+    onChange(Math.round(fracMin.current));
     const stale = performance.now() - lastMoveTime.current;
     // Only launch inertia if the pointer was still moving when released
     if (stale < 80 && Math.abs(lastVelocity.current) > 0.08)
       startInertia(lastVelocity.current);
-  }, [startInertia]);
+  }, [onChange, startInertia]);
 
   const hasRise = sunriseMin !== undefined;
   const hasSet  = sunsetMin  !== undefined;

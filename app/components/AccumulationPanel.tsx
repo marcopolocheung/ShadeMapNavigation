@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { AccumulationOptions } from "./MapView";
+import DateInput from "./DateInput";
 
 interface Bounds {
   getWest(): number;
@@ -134,6 +135,14 @@ function buildGeoTIFF(
   return new Blob([buf], { type: "image/tiff" });
 }
 
+function qualityLabel(n: number): string {
+  if (n <= 8)  return "Fast";
+  if (n <= 24) return "Low";
+  if (n <= 40) return "Balanced";
+  if (n <= 56) return "Good";
+  return "Detailed";
+}
+
 export default function AccumulationPanel({
   accumulation,
   onChange,
@@ -197,30 +206,16 @@ export default function AccumulationPanel({
         <div className="bg-black/70 backdrop-blur-sm rounded-lg p-3 flex flex-col gap-2 text-white text-xs min-w-[240px]">
           <div className="flex items-center gap-2">
             <label className="text-white/50 w-12">From</label>
-            <input
-              type="date"
-              value={toDateInput(accumulation.startDate)}
-              onChange={(e) =>
-                onChange({
-                  ...accumulation,
-                  startDate: parseDateInput(e.target.value, accumulation.startDate),
-                })
-              }
-              className="flex-1 bg-white/10 rounded px-2 py-1 text-white border border-white/10 focus:outline-none"
+            <DateInput
+              date={accumulation.startDate}
+              onChange={(d) => onChange({ ...accumulation, startDate: d })}
             />
           </div>
           <div className="flex items-center gap-2">
             <label className="text-white/50 w-12">To</label>
-            <input
-              type="date"
-              value={toDateInput(accumulation.endDate)}
-              onChange={(e) =>
-                onChange({
-                  ...accumulation,
-                  endDate: parseDateInput(e.target.value, accumulation.endDate),
-                })
-              }
-              className="flex-1 bg-white/10 rounded px-2 py-1 text-white border border-white/10 focus:outline-none"
+            <DateInput
+              date={accumulation.endDate}
+              onChange={(d) => onChange({ ...accumulation, endDate: d })}
             />
           </div>
           <div className="flex items-center gap-2">
@@ -236,22 +231,28 @@ export default function AccumulationPanel({
               }
               className="flex-1 accent-amber-400"
             />
-            <span className="w-6 text-right tabular-nums">
-              {accumulation.iterations}
+            <span className="w-20 text-right leading-tight">
+              <span className="text-white/75">{qualityLabel(accumulation.iterations)}</span>
+              <span className="text-white/25 text-[10px] ml-1">({accumulation.iterations})</span>
             </span>
           </div>
 
           {/* Sun exposure legend */}
-          <div className="flex items-center gap-2 mt-1">
-            <span className="text-white/50">0h</span>
+          <div className="flex flex-col gap-1 mt-1">
             <div
-              className="flex-1 h-2 rounded"
+              className="h-2 rounded"
               style={{
                 background:
                   "linear-gradient(to right, #000080, #0000ff, #00ffff, #00ff00, #ffff00, #ff8800, #ff0000)",
               }}
             />
-            <span className="text-white/50">12h+</span>
+            <div className="flex justify-between text-[9px] text-white/35 tabular-nums px-px">
+              <span>0h</span>
+              <span>3h</span>
+              <span>6h</span>
+              <span>9h</span>
+              <span>12h+</span>
+            </div>
           </div>
 
           <button

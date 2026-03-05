@@ -18,6 +18,8 @@ import {
   snapToEdge,
   dijkstra,
   graphToGeoJSON,
+  bfsReachable,
+  snapToReachableEdge,
   type RoutingGraph,
   type OsmNode,
   type GraphEdge,
@@ -562,5 +564,108 @@ describe("TransitLeg type (compile-time check)", () => {
       transitLeg: leg,
     };
     expect(r.transitLeg?.sunExposure).toBe(0.0);
+  });
+});
+
+// ── Graph fixture: two fully disconnected components ──────────────────────────
+//
+//   Component A (east):  1 --[dAB]--> 2   nodes at lon=0.1 and lon=0.2
+//   Component B (west):  3 --[dCD]--> 4   nodes at lon=0.0 and lon=0.01
+//
+// Used to test that bfsReachable / snapToReachableEdge respect component boundaries.
+
+function makeSplitComponentGraph(): RoutingGraph {
+  const nodes = new Map<number, OsmNode>([
+    [1, { id: 1, lat: 0.0, lon: 0.1 }],
+    [2, { id: 2, lat: 0.0, lon: 0.2 }],
+    [3, { id: 3, lat: 0.0, lon: 0.0 }],
+    [4, { id: 4, lat: 0.0, lon: 0.01 }],
+  ]);
+  const dAB = haversineMeters([0.1, 0], [0.2, 0]);
+  const dCD = haversineMeters([0.0, 0], [0.01, 0]);
+  const adj = new Map<number, GraphEdge[]>([
+    [1, [{ toId: 2, distanceM: dAB, shadeFactor: 0 }]],
+    [2, [{ toId: 1, distanceM: dAB, shadeFactor: 0 }]],
+    [3, [{ toId: 4, distanceM: dCD, shadeFactor: 0 }]],
+    [4, [{ toId: 3, distanceM: dCD, shadeFactor: 0 }]],
+  ]);
+  return { nodes, adj };
+}
+
+// ── Tests: bfsReachable ────────────────────────────────────────────────────────
+
+describe("bfsReachable", () => {
+  it("returns all nodes when the graph is fully connected", () => {
+    const graph = makeLinearGraph(); // 1-2-3 all connected
+    const reachable = bfsReachable(graph, 1);
+    expect(reachable).toEqual(new Set([1, 2, 3]));
+  });
+
+  it("returns only the component of the start node in a disconnected graph", () => {
+    // makeDisconnectedGraph: 1-2 connected, 3 isolated
+    const graph = makeDisconnectedGraph();
+    const reachable = bfsReachable(graph, 1);
+    expect(reachable.has(1)).toBe(true);
+    expect(reachable.has(2)).toBe(true);
+    expect(reachable.has(3)).toBe(false);
+  });
+
+  it("returns only the start node when it is isolated", () => {
+    const graph = makeDisconnectedGraph(); // node 3 has no edges
+    const reachable = bfsReachable(graph, 3);
+    expect(reachable).toEqual(new Set([3]));
+  });
+});
+
+// ── Tests: snapToReachableEdge ────────────────────────────────────────────────
+
+describe("snapToReachableEdge", () => {
+  it("snaps to the nearest reachable edge even when a closer unreachable edge exists", () => {
+    // coord sits on edge 3-4 (unreachable component); reachable = {1,2}
+    const graph = makeSplitComponentGraph();
+    const coord: [number, number] = [0.005, 0.0];
+    const reachable = new Set([1, 2]);
+
+    const result = snapToReachableEdge(coord, graph, reachable, -1);
+
+    expect(result).not.toBeNull();
+    // Nearest point on the 1-2 edge to coord is endpoint 1 (t clips to 0)
+    expect(result!.id).toBe(1);
+  });
+
+  it("returns null when no reachable edges exist", () => {
+    const graph = makeSplitComponentGraph();
+    const coord: [number, number] = [0.005, 0.0];
+    const emptyReachable = new Set<number>();
+
+    const result = snapToReachableEdge(coord, graph, emptyReachable, -1);
+
+    expect(result).toBeNull();
+  });
+
+  it("returns a snap distance near zero when coord sits on a reachable edge", () => {
+    // coord at the midpoint of edge 1-2 (both reachable)
+    const graph = makeSplitComponentGraph();
+    const coord: [number, number] = [0.15, 0.0];
+    const reachable = new Set([1, 2]);
+
+    const result = snapToReachableEdge(coord, graph, reachable, -1);
+
+    expect(result).not.toBeNull();
+    expect(result!.distM).toBeLessThan(1); // essentially on the edge
+  });
+
+  it("inserts a virtual node wired to the snapped edge endpoints", () => {
+    // coord at midpoint of 1-2 — should create virtual node -1
+    const graph = makeSplitComponentGraph();
+    const coord: [number, number] = [0.15, 0.0];
+    const reachable = new Set([1, 2]);
+
+    const result = snapToReachableEdge(coord, graph, reachable, -1);
+
+    expect(result!.id).toBe(-1); // virtual node inserted
+    const vAdj = graph.adj.get(-1)!;
+    const toIds = vAdj.map((e) => e.toId).sort((a, b) => a - b);
+    expect(toIds).toEqual([1, 2]); // wired bidirectionally to 1 and 2
   });
 });

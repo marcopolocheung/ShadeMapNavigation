@@ -390,6 +390,7 @@ export function paretoRoutes(
     nodeId: number;
     parentId: number;      // allLabels index; -1 for the start label
     prevEdge: GraphEdge | null;
+    evicted: boolean;
   }
 
   const allLabels: PLabel[] = [];
@@ -397,7 +398,7 @@ export function paretoRoutes(
     distM: number, shadeM: number, nodeId: number,
     parentId: number, prevEdge: GraphEdge | null
   ): PLabel => {
-    const lbl: PLabel = { id: allLabels.length, distM, shadeM, nodeId, parentId, prevEdge };
+    const lbl: PLabel = { id: allLabels.length, distM, shadeM, nodeId, parentId, prevEdge, evicted: false };
     allLabels.push(lbl);
     return lbl;
   };
@@ -427,12 +428,16 @@ export function paretoRoutes(
       if (dom(allLabels[id], incoming)) return false;
     }
     for (let i = set.length - 1; i >= 0; i--) {
-      if (dom(incoming, allLabels[set[i]])) set.splice(i, 1);
+      if (dom(incoming, allLabels[set[i]])) {
+        allLabels[set[i]].evicted = true;
+        set.splice(i, 1);
+      }
     }
     // If at capacity, reject if incoming would be the new worst (tail)
     if (set.length >= MAX_LABELS_PER_NODE) {
       const worstDistM = allLabels[set[set.length - 1]].distM;
       if (incoming.distM >= worstDistM) return false;
+      allLabels[set[set.length - 1]].evicted = true;
       set.pop(); // evict current worst to make room
     }
     let pos = set.length;
@@ -462,7 +467,7 @@ export function paretoRoutes(
     const label = allLabels[labelId];
 
     // Skip if this label was evicted from its node's Pareto set since being pushed
-    if (!getSet(label.nodeId).includes(labelId)) continue;
+    if (label.evicted) continue;
 
     for (const edge of graph.adj.get(label.nodeId) ?? []) {
       const toNode = graph.nodes.get(edge.toId);
@@ -592,6 +597,125 @@ export function paretoRoutes(
   tryAdd(mostShaded);
 
   return results;
+}
+
+/**
+ * BFS from startId — returns the set of all node IDs reachable from startId
+ * in the graph (including startId itself).
+ */
+export function bfsReachable(
+  graph: RoutingGraph,
+  startId: number
+): Set<number> {
+  const visited = new Set<number>();
+  const queue: number[] = [startId];
+  visited.add(startId);
+  let head = 0;
+  while (head < queue.length) {
+    const id = queue[head++];
+    for (const edge of graph.adj.get(id) ?? []) {
+      if (!visited.has(edge.toId)) {
+        visited.add(edge.toId);
+        queue.push(edge.toId);
+      }
+    }
+  }
+  return visited;
+}
+
+/**
+ * Like snapToEdge, but only considers edges where BOTH endpoints are in
+ * reachableIds. Returns { id, distM } where id is the snapped node ID
+ * (virtual or endpoint) and distM is the distance from coord to the snap
+ * point. Returns null if no reachable edge exists in the graph.
+ */
+export function snapToReachableEdge(
+  coord: [number, number],
+  graph: RoutingGraph,
+  reachableIds: Set<number>,
+  virtualId: number
+): { id: number; distM: number } | null {
+  let bestDist: number = Infinity;
+  let bestT = 0;
+  let bestFromId: number | null = null;
+  let bestToId = 0;
+  let bestLon = coord[0];
+  let bestLat = coord[1];
+
+  for (const [fromId, edges] of graph.adj) {
+    if (fromId < 0) continue;
+    if (!reachableIds.has(fromId)) continue;
+    const fromNode = graph.nodes.get(fromId);
+    if (!fromNode) continue;
+
+    for (const edge of edges) {
+      if (edge.toId < 0) continue;
+      if (!reachableIds.has(edge.toId)) continue;
+      const toNode = graph.nodes.get(edge.toId);
+      if (!toNode) continue;
+
+      const ax = fromNode.lon, ay = fromNode.lat;
+      const bx = toNode.lon,   by = toNode.lat;
+      const abx = bx - ax, aby = by - ay;
+      const ab2 = abx * abx + aby * aby;
+      const t =
+        ab2 === 0
+          ? 0
+          : Math.max(0, Math.min(1,
+              ((coord[0] - ax) * abx + (coord[1] - ay) * aby) / ab2
+            ));
+      const projLon = ax + t * abx;
+      const projLat = ay + t * aby;
+      const dist = haversineMeters(coord, [projLon, projLat]);
+
+      if (dist < bestDist) {
+        bestDist   = dist;
+        bestT      = t;
+        bestFromId = fromId;
+        bestToId   = edge.toId;
+        bestLon    = projLon;
+        bestLat    = projLat;
+      }
+    }
+  }
+
+  if (bestFromId === null) return null;
+
+  // Projection landed exactly on an endpoint
+  if (bestT === 0) {
+    const n = graph.nodes.get(bestFromId)!;
+    return { id: bestFromId, distM: haversineMeters(coord, [n.lon, n.lat]) };
+  }
+  if (bestT === 1) {
+    const n = graph.nodes.get(bestToId)!;
+    return { id: bestToId, distM: haversineMeters(coord, [n.lon, n.lat]) };
+  }
+
+  // Insert virtual node at projection point
+  graph.nodes.set(virtualId, { id: virtualId, lat: bestLat, lon: bestLon });
+
+  const fromNode = graph.nodes.get(bestFromId)!;
+  const toNode   = graph.nodes.get(bestToId)!;
+  const totalDist = haversineMeters(
+    [fromNode.lon, fromNode.lat],
+    [toNode.lon,   toNode.lat]
+  );
+  const distToFrom = totalDist * bestT;
+  const distToTo   = totalDist * (1 - bestT);
+
+  const shadeFactor =
+    (graph.adj.get(bestFromId) ?? []).find((e) => e.toId === bestToId)
+      ?.shadeFactor ?? 0;
+
+  graph.adj.set(virtualId, [
+    { toId: bestFromId, distanceM: distToFrom, shadeFactor },
+    { toId: bestToId,   distanceM: distToTo,   shadeFactor },
+  ]);
+  graph.adj.get(bestFromId)!.push({ toId: virtualId, distanceM: distToFrom, shadeFactor });
+  const toAdj = graph.adj.get(bestToId);
+  if (toAdj) toAdj.push({ toId: virtualId, distanceM: distToTo, shadeFactor });
+
+  return { id: virtualId, distM: bestDist };
 }
 
 /** Converts a node ID path → GeoJSON LineString feature. */

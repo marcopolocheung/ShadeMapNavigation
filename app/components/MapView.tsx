@@ -183,6 +183,7 @@ export default function MapView({
       center: [0, 20],
       zoom: 2,
       maxTileCacheSize: 50,
+      // @ts-expect-error — property exists at runtime but is missing from MapLibre types
       maxParallelImageRequests: 6,
       canvasContextAttributes: { preserveDrawingBuffer: true },
     });

@@ -4,7 +4,13 @@ import type { OsmNode, GraphEdge, RoutingGraph } from "./routing";
 const OVERPASS_URL = "https://overpass-api.de/api/interpreter";
 const OVERPASS_FALLBACK_URL = "https://overpass.kumi.systems/api/interpreter";
 
-async function postOverpass(url: string, body: string): Promise<Response> {
+const FETCH_TIMEOUT_MS = 30_000;
+
+async function postOverpass(
+  url: string,
+  body: string,
+  signal?: AbortSignal
+): Promise<Response> {
   return fetch(url, {
     method: "POST",
     headers: {
@@ -12,6 +18,7 @@ async function postOverpass(url: string, body: string): Promise<Response> {
       "User-Agent": "ShadeMapNav/1.0",
     },
     body,
+    signal,
   });
 }
 
@@ -63,21 +70,34 @@ export async function fetchRoutingGraph(
   }
 
   const query = `
-[out:json][timeout:60];
+[out:json][timeout:25];
 (
-  way["highway"~"^(footway|path|pedestrian|living_street|residential|unclassified|tertiary|secondary|service|cycleway|steps|track|bridleway)$"]
+  way["highway"~"^(footway|path|pedestrian|living_street|residential|unclassified|tertiary|secondary|service|cycleway|steps|track|bridleway)$"]["area"!="yes"]
   (${south},${west},${north},${east});
 );
-out body;
->;
-out skel qt;
+out body geom;
 `.trim();
 
   const encodedBody = `data=${encodeURIComponent(query)}`;
 
-  let res = await postOverpass(OVERPASS_URL, encodedBody);
-  if (!res.ok && res.status >= 500) {
-    res = await postOverpass(OVERPASS_FALLBACK_URL, encodedBody);
+  const controller = new AbortController();
+  const tid = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await postOverpass(OVERPASS_URL, encodedBody, controller.signal);
+    if (!res.ok && res.status >= 500) {
+      res = await postOverpass(OVERPASS_FALLBACK_URL, encodedBody, controller.signal);
+    }
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error(
+        "Route request timed out — try a shorter route or a less busy area."
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(tid);
   }
 
   if (!res.ok) {
@@ -89,17 +109,22 @@ out skel qt;
     throw new Error(`Overpass API error: ${res.status} ${res.statusText}`);
   }
 
-  const json = await res.json();
+  const text = await res.text();
+  if (text.trimStart().startsWith("<")) {
+    throw new Error(
+      "The map server returned an error — the area may be too complex. Try repositioning your waypoints."
+    );
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const json = JSON.parse(text) as { elements?: any[] };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const elements: any[] = json.elements ?? [];
 
-  // Separate nodes and ways
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const rawNodes = elements.filter((e: any) => e.type === "node");
+  // out body geom returns only way elements — geometry is inline as way.geometry[i].{lat,lon}
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const rawWays = elements.filter((e: any) => e.type === "way");
 
-  if (rawNodes.length === 0 || rawWays.length === 0) {
+  if (rawWays.length === 0) {
     throw new Error(
       "No walkable roads found in this area. Try a more urban location or zoom closer."
     );
@@ -117,16 +142,8 @@ out skel qt;
     }
   }
 
-  // Build node map
+  // Build node map and adjacency list from inline geometry
   const nodes = new Map<number, OsmNode>();
-  for (const n of rawNodes) {
-    nodes.set(n.id, {
-      id: n.id, lat: n.lat, lon: n.lon,
-      isIntersection: (nodeWayCount.get(n.id) ?? 0) >= 2,
-    });
-  }
-
-  // Build adjacency list
   const adj = new Map<number, GraphEdge[]>();
 
   const ensureAdj = (id: number) => {
@@ -135,6 +152,29 @@ out skel qt;
 
   for (const way of rawWays) {
     const nodeRefs: number[] = way.nodes ?? [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const geom: Array<{ lat: number; lon: number }> = way.geometry ?? [];
+
+    // Skip closed highway=pedestrian ways — these are plaza/square area polygons,
+    // not walkable paths. Their ring geometry would otherwise add spurious edges.
+    const isClosed =
+      nodeRefs.length >= 2 &&
+      nodeRefs[0] === nodeRefs[nodeRefs.length - 1];
+    if (isClosed && way.tags?.highway === "pedestrian") continue;
+
+    // Register nodes from inline geometry
+    for (let i = 0; i < nodeRefs.length; i++) {
+      const nid = nodeRefs[i];
+      if (!nodes.has(nid) && geom[i]) {
+        nodes.set(nid, {
+          id: nid,
+          lat: geom[i].lat,
+          lon: geom[i].lon,
+          isIntersection: (nodeWayCount.get(nid) ?? 0) >= 2,
+        });
+      }
+    }
+
     for (let i = 0; i < nodeRefs.length - 1; i++) {
       const fromId = nodeRefs[i];
       const toId = nodeRefs[i + 1];

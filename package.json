@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "mapbox-gl-shadow-simulator": "^0.67.0",
+    "mapbox-gl-shadow-simulator": "^0.68.1",
     "maplibre-gl": "5.9.0",
     "next": "16.1.6",
     "react": "19.2.3",
