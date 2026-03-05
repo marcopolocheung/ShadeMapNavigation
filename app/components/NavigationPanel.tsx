@@ -491,6 +491,29 @@ export default function NavigationPanel({
                           {r.turnCount > 0 && <span>{r.turnCount} turn{r.turnCount === 1 ? '' : 's'}</span>}
                         </div>
                       )}
+                      {r.transitLeg && (
+                        <div className="mt-1.5 text-[10px] text-white/50 flex flex-col gap-0.5">
+                          <div className="flex items-center gap-1">
+                            <span
+                              className="inline-block w-2 h-2 rounded-full shrink-0"
+                              style={{ backgroundColor: TRANSIT_MODE_COLOR[r.transitLeg.boardStop.mode as TransitMode] }}
+                            />
+                            <span className="truncate">
+                              {r.transitLeg.boardStop.name || "Stop"} → {r.transitLeg.alightStop.name || "Stop"}
+                            </span>
+                          </div>
+                          <div className="flex gap-x-2 flex-wrap">
+                            <span>{Math.round(r.transitLeg.walkToBoardM)} m walk</span>
+                            <span className="text-white/20">·</span>
+                            <span className="capitalize">{r.transitLeg.boardStop.mode}</span>
+                            <span className="text-white/20">·</span>
+                            <span>{Math.round(r.transitLeg.walkFromAlightM)} m walk</span>
+                          </div>
+                          {r.transitLeg.sunExposure === 0 && (
+                            <span className="text-cyan-400/70">Underground — no sun exposure</span>
+                          )}
+                        </div>
+                      )}
                     </button>
                   );
                 })}
