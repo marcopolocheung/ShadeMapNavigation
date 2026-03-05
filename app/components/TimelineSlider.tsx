@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useEffect, useCallback } from "react";
+import { toMapLocal } from "../lib/timezone";
 
 interface Props {
   minutes: number; // 0–1439
@@ -22,9 +23,8 @@ function computeSunriseSetMinutes(
   lngDeg: number,
   utcOffsetMin: number
 ): { riseMin: number; setMin: number } | null {
-  const noon = new Date(date);
-  noon.setHours(12, 0, 0, 0);
-  const noonN = noon.getTime() / 86400000 + 2440587.5 - 2451545.0;
+  const { year, month, day } = toMapLocal(date, utcOffsetMin);
+  const noonN = Date.UTC(year, month, day, 12) / 86400000 + 2440587.5 - 2451545.0;
   const L = (280.46 + 0.9856474 * noonN) % 360;
   const g = ((357.528 + 0.9856003 * noonN) % 360) * (Math.PI / 180);
   const lambda = (L + 1.915 * Math.sin(g) + 0.020 * Math.sin(2 * g)) * (Math.PI / 180);
@@ -35,7 +35,7 @@ function computeSunriseSetMinutes(
   if (Math.abs(cosHA0) > 1) return null; // polar day or polar night
   const HA0 = Math.acos(cosHA0);
   const halfDayMin = HA0 * (720 / Math.PI);
-  // Solar noon in local clock minutes; longitude-based correction + DST via getTimezoneOffset()
+  // Solar noon in local clock minutes: longitude correction converts UTC solar noon to local time
   const solarNoonLocal = 720 - lngDeg * 4 + utcOffsetMin;
   return {
     riseMin: Math.round(solarNoonLocal - halfDayMin) + 12,
