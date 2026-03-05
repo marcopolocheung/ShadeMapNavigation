@@ -5,9 +5,10 @@ import { useRef, useEffect, useCallback } from "react";
 interface Props {
   minutes: number; // 0–1439
   onChange: (minutes: number) => void;
-  date?: Date;       // used for sunrise/sunset calculation
-  latDeg?: number;   // map center latitude
-  lngDeg?: number;   // map center longitude
+  date?: Date;           // used for sunrise/sunset calculation
+  latDeg?: number;       // map center latitude
+  lngDeg?: number;       // map center longitude
+  utcOffsetMin?: number; // map location's UTC offset (positive = ahead of UTC); defaults to browser's offset
 }
 
 // ---------------------------------------------------------------------------
@@ -18,7 +19,8 @@ interface Props {
 function computeSunriseSetMinutes(
   date: Date,
   latDeg: number,
-  lngDeg: number
+  lngDeg: number,
+  utcOffsetMin: number
 ): { riseMin: number; setMin: number } | null {
   const noon = new Date(date);
   noon.setHours(12, 0, 0, 0);
@@ -34,10 +36,10 @@ function computeSunriseSetMinutes(
   const HA0 = Math.acos(cosHA0);
   const halfDayMin = HA0 * (720 / Math.PI);
   // Solar noon in local clock minutes; longitude-based correction + DST via getTimezoneOffset()
-  const solarNoonLocal = 720 - lngDeg * 4 - date.getTimezoneOffset();
+  const solarNoonLocal = 720 - lngDeg * 4 + utcOffsetMin;
   return {
-    riseMin: Math.round(solarNoonLocal - halfDayMin),
-    setMin:  Math.round(solarNoonLocal + halfDayMin),
+    riseMin: Math.round(solarNoonLocal - halfDayMin) + 12,
+    setMin:  Math.round(solarNoonLocal + halfDayMin) + 12,
   };
 }
 
@@ -79,10 +81,11 @@ const TICKS = (() => {
 
 const TOTAL_PX = 1440 * PX_PER_MIN;
 
-export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg }: Props) {
+export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg, utcOffsetMin: utcOffsetMinProp }: Props) {
+  const effectiveOffset = utcOffsetMinProp ?? (date ? -date.getTimezoneOffset() : 0);
   const sunRiseSet =
     date !== undefined && latDeg !== undefined && lngDeg !== undefined
-      ? computeSunriseSetMinutes(date, latDeg, lngDeg)
+      ? computeSunriseSetMinutes(date, latDeg, lngDeg, effectiveOffset)
       : null;
   const sunriseMin = sunRiseSet?.riseMin;
   const sunsetMin  = sunRiseSet?.setMin;
@@ -247,7 +250,7 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
           />
         )}
 
-        {/* ── Daytime gradient: burnt-orange → navy (mirrors circle sector) */}
+        {/* ── Daytime gradient: dawn warm → pale noon → dusk warm */}
         {hasRise && hasSet && (
           <div
             style={{
@@ -255,7 +258,7 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
               left: sunriseMin! * PX_PER_MIN,
               width: (sunsetMin! - sunriseMin!) * PX_PER_MIN,
               top: 0, bottom: 0,
-              background: "linear-gradient(to right, rgba(194,65,12,0.28), rgba(30,64,175,0.28))",
+              background: "linear-gradient(to right, rgba(194,65,12,0.32), rgba(251,191,36,0.08) 50%, rgba(30,64,175,0.32))",
             }}
           />
         )}
@@ -295,17 +298,20 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
             <span
               style={{
                 position: "absolute",
-                top: 2,
-                left: 4,
-                fontSize: 9,
-                lineHeight: 1,
-                color: "#c2410c",
+                top: 3,
+                left: 5,
+                fontSize: 10,
+                lineHeight: 1.2,
+                color: "#fb923c",
                 whiteSpace: "nowrap",
                 userSelect: "none",
                 pointerEvents: "none",
+                backgroundColor: "rgba(0,0,0,0.55)",
+                borderRadius: 3,
+                padding: "1px 4px",
               }}
             >
-              ▲ {fmtMin(sunriseMin!)}
+              ↑ {fmtMin(sunriseMin!)}
             </span>
           </div>
         )}
@@ -332,17 +338,20 @@ export default function TimelineSlider({ minutes, onChange, date, latDeg, lngDeg
             <span
               style={{
                 position: "absolute",
-                top: 2,
-                left: 4,
-                fontSize: 9,
-                lineHeight: 1,
-                color: "#6b9fff",
+                top: 3,
+                left: 5,
+                fontSize: 10,
+                lineHeight: 1.2,
+                color: "#93c5fd",
                 whiteSpace: "nowrap",
                 userSelect: "none",
                 pointerEvents: "none",
+                backgroundColor: "rgba(0,0,0,0.55)",
+                borderRadius: 3,
+                padding: "1px 4px",
               }}
             >
-              ▼ {fmtMin(sunsetMin!)}
+              ↓ {fmtMin(sunsetMin!)}
             </span>
           </div>
         )}
