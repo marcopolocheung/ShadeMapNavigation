@@ -28,6 +28,16 @@ export interface RouteResult {
   turnCount: number;
 }
 
+export interface TransitLeg {
+  boardStop:  { id: number; lat: number; lon: number; name: string; mode: string };
+  alightStop: { id: number; lat: number; lon: number; name: string; mode: string };
+  transitDistM: number;
+  /** 0.0 = underground (subway/rail), 0.25 = above-ground (bus/tram/ferry) */
+  sunExposure: number;
+  walkToBoardM: number;
+  walkFromAlightM: number;
+}
+
 export interface RouteOption {
   label: string; // "Shortest" | "Balanced" | "Most shaded"
   geojson: GeoJSON.Feature<GeoJSON.LineString>;
@@ -37,6 +47,7 @@ export interface RouteOption {
   shadeTransitions: number;
   detourRatio: number;
   turnCount: number;
+  transitLeg?: TransitLeg; // undefined for all pure-walk routes
 }
 
 export interface DijkstraOptions {

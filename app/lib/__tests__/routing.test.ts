@@ -534,3 +534,33 @@ describe("computeDerivedKpis", () => {
     expect(kpis.pathLengthDeltaPct).toBeCloseTo(-33.33, 1);
   });
 });
+
+import type { RouteOption, TransitLeg } from "../routing";
+
+describe("TransitLeg type (compile-time check)", () => {
+  it("RouteOption without transitLeg compiles (pure-walk)", () => {
+    const r: RouteOption = {
+      label: "Shortest",
+      geojson: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [] } },
+      distanceM: 200, shadeCoverage: 0.3, longestContinuousShadeM: 100,
+      shadeTransitions: 1, detourRatio: 1.0, turnCount: 2,
+    };
+    expect(r.transitLeg).toBeUndefined();
+  });
+
+  it("RouteOption with transitLeg compiles", () => {
+    const leg: TransitLeg = {
+      boardStop:  { id: 1, lat: 48.1, lon: 11.5, name: "Central", mode: "subway" },
+      alightStop: { id: 2, lat: 48.2, lon: 11.6, name: "North",   mode: "subway" },
+      transitDistM: 1200, sunExposure: 0.0, walkToBoardM: 150, walkFromAlightM: 200,
+    };
+    const r: RouteOption = {
+      label: "Via Transit",
+      geojson: { type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: [] } },
+      distanceM: 1550, shadeCoverage: 0.1, longestContinuousShadeM: 0,
+      shadeTransitions: 0, detourRatio: 1.0, turnCount: 0,
+      transitLeg: leg,
+    };
+    expect(r.transitLeg?.sunExposure).toBe(0.0);
+  });
+});
