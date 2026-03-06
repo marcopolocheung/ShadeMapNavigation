@@ -125,3 +125,119 @@ async function raceOverpass(query: string, signal?: AbortSignal): Promise<string
     return null;
   }
 }
+
+function parseStops(text: string): TransitStop[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const elements: any[] = (JSON.parse(text) as { elements?: any[] }).elements ?? [];
+  const seen = new Set<number>();
+  const stops: TransitStop[] = [];
+  for (const el of elements) {
+    if (el.type !== "node" || seen.has(el.id)) continue;
+    seen.add(el.id);
+    const tags: Record<string, string | undefined> = el.tags ?? {};
+    const mode = inferMode(tags);
+    stops.push({ id: el.id, lat: el.lat, lon: el.lon, name: tags.name ?? tags["name:en"] ?? "", mode, rankScore: modeRankScore(mode) });
+  }
+  stops.sort((a, b) => b.rankScore - a.rankScore);
+  return stops;
+}
+
+async function fetchTile(s: number, w: number, n: number, e: number, key: string): Promise<TransitStop[] | null> {
+  if (tileCache.has(key)) return tileCache.get(key)!;
+  if (inFlightTiles.has(key)) return inFlightTiles.get(key)!;
+
+  const ctrl = new AbortController();
+  const tid  = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+
+  const promise = (async (): Promise<TransitStop[] | null> => {
+    try {
+      const text = await raceOverpass(buildQuery(s, w, n, e), ctrl.signal);
+      if (!text) return null;
+      const stops = parseStops(text);
+      tileCache.set(key, stops);
+      return stops;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(tid);
+      inFlightTiles.delete(key);
+    }
+  })();
+
+  inFlightTiles.set(key, promise);
+  return promise;
+}
+
+const TILE_FETCH_LIMIT = 6;
+
+function composeTiles(tileResults: TransitStop[][], zoom: number, limit: number): TransitStop[] {
+  const seen = new Set<number>();
+  const all: TransitStop[] = [];
+  for (const stops of tileResults) {
+    for (const s of stops) {
+      if (!seen.has(s.id)) { seen.add(s.id); all.push(s); }
+    }
+  }
+  const minRank = rankThresholdForZoom(zoom);
+  return all
+    .filter(s => s.rankScore >= minRank)
+    .sort((a, b) => b.rankScore - a.rankScore)
+    .slice(0, Math.min(limit, 60));
+}
+
+/** Synchronous — returns only what is already in the tile cache. Call before fetchTransitStops for instant display. */
+export function getStopsFromCache(
+  south: number, west: number, north: number, east: number,
+  zoom = 14, limit = 30
+): TransitStop[] {
+  const tiles = tilesForBbox(south, west, north, east);
+  const cached = tiles.map(t => tileCache.get(t.key)).filter((s): s is TransitStop[] => s !== undefined);
+  return cached.length === 0 ? [] : composeTiles(cached, zoom, limit);
+}
+
+/**
+ * Fetches transit stops for the viewport bbox using tile-grid caching.
+ * Returns TransitStop[] on success (may be empty), null on complete failure.
+ * Callers should call getStopsFromCache first for instant display.
+ */
+export async function fetchTransitStops(
+  south: number, west: number, north: number, east: number,
+  zoom = 14, limit = 30
+): Promise<TransitStop[] | null> {
+  if (zoom < 9) return [];
+
+  const tiles = tilesForBbox(south, west, north, east);
+
+  if (tiles.length > TILE_FETCH_LIMIT) {
+    // Bbox too large for tile caching — single-bbox fallback (low zoom, rare)
+    const ctrl = new AbortController();
+    const tid  = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const text = await raceOverpass(buildQuery(south, west, north, east), ctrl.signal);
+      if (!text) return null;
+      return composeTiles([parseStops(text)], zoom, limit);
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(tid);
+    }
+  }
+
+  const results = await Promise.all(tiles.map(t => fetchTile(t.s, t.w, t.n, t.e, t.key)));
+  const successful = results.filter((r): r is TransitStop[] => r !== null);
+  if (successful.length === 0 && results.some(r => r === null)) return null;
+  return composeTiles(successful, zoom, limit);
+}
+
+/** Silently prefetches tiles adjacent to the given bbox (1-tile ring) to warm the cache. */
+export function prefetchAdjacentTiles(south: number, west: number, north: number, east: number): void {
+  const T = TILE_SIZE;
+  const r2 = (x: number) => Math.round(x * 100) / 100;
+  const expanded = tilesForBbox(r2(south - T), r2(west - T), r2(north + T), r2(east + T));
+  const currentKeys = new Set(tilesForBbox(south, west, north, east).map(t => t.key));
+  for (const t of expanded) {
+    if (!currentKeys.has(t.key) && !tileCache.has(t.key) && !inFlightTiles.has(t.key)) {
+      void fetchTile(t.s, t.w, t.n, t.e, t.key);
+    }
+  }
+}

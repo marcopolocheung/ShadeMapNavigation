@@ -99,24 +99,27 @@ describe("fetchTransitStops", () => {
     expect(await fetchTransitStops(...nextBbox())).toBeNull();
   });
 
-  it("caches result and does not re-fetch for a sub-bbox", async () => {
-    const fn = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ elements: [] }) });
+  it("caches result and does not re-fetch for same tile area", async () => {
+    const fn = vi.fn().mockResolvedValue({ ok: true, status: 200,
+      text: async () => JSON.stringify({ elements: [] }) });
     vi.stubGlobal("fetch", fn);
-    const [s, w, n, e] = nextBbox();
+    const [s, w, n, e] = nextBbox(); // e.g. [60, 60, 60.01, 60.01]
     await fetchTransitStops(s, w, n, e);
+    const countAfterFirst = fn.mock.calls.length; // 1–3 (race endpoints)
+    // Sub-bbox is in the same tile → should hit cache, no new fetches
     await fetchTransitStops(s + 0.001, w + 0.001, n - 0.001, e - 0.001);
-    expect(fn).toHaveBeenCalledTimes(1);
+    expect(fn.mock.calls.length).toBe(countAfterFirst);
   });
 
-  it("query includes bus_stop, railway, public_transport, ferry_terminal", async () => {
+  it("query includes bus_stop, railway, ferry_terminal but not public_transport=stop_position", async () => {
     const fn = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ elements: [] }) });
     vi.stubGlobal("fetch", fn);
     await fetchTransitStops(...nextBbox());
     const body = decodeURIComponent((fn.mock.calls[0][1] as RequestInit).body as string).replace(/^data=/, "");
     expect(body).toContain("bus_stop");
     expect(body).toContain("railway");
-    expect(body).toContain("public_transport");
     expect(body).toContain("ferry_terminal");
+    expect(body).not.toContain("public_transport");
   });
 
   it("zoom 10 → only subway+rail stops returned (rankScore ≥ 80)", async () => {
@@ -171,6 +174,36 @@ describe("fetchTransitStops", () => {
   });
 });
 
+describe("tile cache and in-flight deduplication", () => {
+  it("second fetchTransitStops for the same tile area does not re-fetch", async () => {
+    const fn = vi.fn().mockResolvedValue({ ok: true, status: 200,
+      text: async () => JSON.stringify({ elements: [
+        { type: "node", id: 700, lat: 48.1, lon: 11.3, tags: { highway: "bus_stop", name: "Stop A" } },
+      ]}) });
+    vi.stubGlobal("fetch", fn);
+    const b: [number, number, number, number] = [48.10, 11.30, 48.12, 11.32]; // fits in tile lat48.00_lon11.25
+    await fetchTransitStops(...b, 14, 30);
+    const countAfterFirst = fn.mock.calls.length; // 3 (one per endpoint race)
+    await fetchTransitStops(...b, 14, 30); // same tile → cache hit
+    expect(fn.mock.calls.length).toBe(countAfterFirst); // no new fetches
+  });
+
+  it("concurrent fetchTransitStops for the same tile only fires one set of requests", async () => {
+    const fn = vi.fn().mockResolvedValue({ ok: true, status: 200,
+      text: async () => JSON.stringify({ elements: [] }) });
+    vi.stubGlobal("fetch", fn);
+    const b: [number, number, number, number] = [48.10, 11.30, 48.12, 11.32];
+    await Promise.all([
+      fetchTransitStops(...b, 14, 30),
+      fetchTransitStops(...b, 14, 30),
+    ]);
+    const totalAfterBoth = fn.mock.calls.length;
+    // Third call should hit cache
+    await fetchTransitStops(...b, 14, 30);
+    expect(fn.mock.calls.length).toBe(totalAfterBoth);
+  });
+});
+
 describe("raceOverpass (tested via fetchTransitStops)", () => {
   it("succeeds when the primary endpoint fails but a fallback responds", async () => {
     vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
@@ -201,6 +234,62 @@ describe("raceOverpass (tested via fetchTransitStops)", () => {
     }));
     const stops = await fetchTransitStops(...nextBbox(), 14, 30);
     expect(stops).toBeNull();
+  });
+});
+
+describe("getStopsFromCache", () => {
+  it("returns empty array when no tiles cached", () => {
+    const stops = getStopsFromCache(2.0, 2.0, 2.1, 2.1);
+    expect(stops).toEqual([]);
+  });
+
+  it("returns stops synchronously after a completed fetch", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200,
+      text: async () => JSON.stringify({ elements: [
+        { type: "node", id: 800, lat: 48.11, lon: 11.31, tags: { highway: "bus_stop", name: "SyncStop" } },
+      ]}) }));
+    const b: [number, number, number, number] = [48.10, 11.30, 48.12, 11.32];
+    await fetchTransitStops(...b, 14, 30);
+    const cached = getStopsFromCache(...b, 14, 30);
+    expect(cached.length).toBeGreaterThan(0);
+    expect(cached[0].name).toBe("SyncStop");
+  });
+
+  it("applies zoom rank threshold when reading from cache", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200,
+      text: async () => JSON.stringify({ elements: [
+        { type: "node", id: 801, lat: 48.11, lon: 11.31, tags: { highway: "bus_stop", name: "BusStop" } },
+        { type: "node", id: 802, lat: 48.11, lon: 11.31, tags: { railway: "subway_entrance", name: "Metro" } },
+      ]}) }));
+    const b: [number, number, number, number] = [48.10, 11.30, 48.12, 11.32];
+    await fetchTransitStops(...b, 14, 30);
+    // zoom=11 → threshold 80 → only subway (90) survives
+    const cached = getStopsFromCache(...b, 11, 30);
+    expect(cached.every(s => s.rankScore >= 80)).toBe(true);
+    expect(cached.some(s => s.mode === "bus")).toBe(false);
+  });
+});
+
+describe("fetchTransitStops tile-based", () => {
+  it("merges stops from two tiles, deduplicating by id", async () => {
+    // bbox spanning two lat tiles: 48.20–48.30 crosses the 48.25 boundary
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200,
+      text: async () => JSON.stringify({ elements: [
+        { type: "node", id: 900, lat: 48.22, lon: 11.31, tags: { highway: "bus_stop", name: "StopX" } },
+      ]}) }));
+    const stops = await fetchTransitStops(48.20, 11.30, 48.30, 11.32, 14, 30);
+    expect(stops).not.toBeNull();
+    // StopX appears in one tile; the same stop should appear only once even if both tiles return it
+    const ids = stops!.map(s => s.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("returns empty array (not null) for zoom < 9", async () => {
+    const fn = vi.fn();
+    vi.stubGlobal("fetch", fn);
+    const result = await fetchTransitStops(0, 0, 1, 1, 8, 30);
+    expect(result).toEqual([]);
+    expect(fn).not.toHaveBeenCalled();
   });
 });
 
