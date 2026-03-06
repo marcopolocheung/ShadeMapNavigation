@@ -8,12 +8,13 @@ import TimelineSlider from "./components/TimelineSlider";
 import AccumulationPanel from "./components/AccumulationPanel";
 import NavigationPanel from "./components/NavigationPanel";
 import SettingsPanel from "./components/SettingsPanel";
+import TransitLogPanel from "./components/TransitLogPanel";
 import DateInput from "./components/DateInput";
 import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
 import { fetchTransitStops, getStopsFromCache, prefetchAdjacentTiles } from "./lib/transit";
-import type { TransitStop } from "./lib/transit";
+import type { TransitStop, TransitMode } from "./lib/transit";
 import { findBestHybridCandidate, hybridCandidateToRouteOption } from "./lib/hybrid-routing";
 import { geocodeReverse } from "./lib/nominatim";
 import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, bfsReachable, snapToReachableEdge, RouteOption } from "./lib/routing";
@@ -25,6 +26,17 @@ import { longitudeToUtcOffsetMin, toMapLocal, fromMapLocal } from "./lib/timezon
 
 // MapView is client-only (uses browser APIs); skip SSR entirely
 const MapView = dynamic(() => import("./components/MapView"), { ssr: false });
+
+interface TransitLogEntry {
+  id: number;
+  ts: Date;
+  event: "FETCH" | "CACHE_HIT" | "SKIPPED" | "ERROR";
+  zoom: number;
+  stopCount?: number;
+  modes?: Partial<Record<TransitMode, number>>;
+  reason?: string;
+}
+let _logSeq = 0;
 
 function todayAt(hours: number): Date {
   const d = new Date();
@@ -248,6 +260,11 @@ export default function Home() {
   const [showTransit, setShowTransit]           = useState(false);
   const [transitStops, setTransitStops]         = useState<TransitStop[]>([]);
   const [transitPopupStop, setTransitPopupStop] = useState<TransitStop | null>(null);
+
+  // Debug / log state
+  const [mapZoom, setMapZoom]                   = useState(2);
+  const [showTransitLog, setShowTransitLog]     = useState(false);
+  const [transitLogs, setTransitLogs]           = useState<TransitLogEntry[]>([]);
   const showTransitRef   = useRef(showTransit);
   showTransitRef.current = showTransit;
   const transitStopsRef   = useRef<TransitStop[]>(transitStops);
@@ -336,6 +353,8 @@ export default function Home() {
       setMapCenter([c.lat, c.lng]);
       setMapUtcOffsetMin(longitudeToUtcOffsetMin(c.lng));
     });
+    map.on("zoom", () => setMapZoom(map.getZoom()));
+    setMapZoom(map.getZoom()); // seed initial value
   }, []);
 
   const handleSliderChange = useCallback((m: number) => {
@@ -857,15 +876,27 @@ export default function Home() {
   const prefetchTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fetchSeqRef          = useRef(0);
 
+  // Stable helper: setTransitLogs setter is guaranteed stable by React.
+  const pushLog = useCallback((entry: Omit<TransitLogEntry, "id" | "ts">) => {
+    setTransitLogs(prev => [{ ...entry, id: ++_logSeq, ts: new Date() }, ...prev].slice(0, 100));
+  }, []);
+
   const fetchTransitForViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map || !showTransitRef.current) return;
     const zoom = map.getZoom();
-    // Safety floor: continent-scale bboxes cause Overpass timeouts
-    if (zoom < 9) return;
+    // Safety floor: continent-scale bboxes
+    if (zoom < 9) {
+      pushLog({ event: "SKIPPED", zoom, reason: "zoom < 9" });
+      return;
+    }
     // Time-of-day gate: no transit midnight–5 AM map-local time
     const localHours = toMapLocal(dateRef.current, mapUtcOffsetMinRef.current).hours;
-    if (localHours < 5) { setTransitStops([]); return; }
+    if (localHours < 5) {
+      pushLog({ event: "SKIPPED", zoom, reason: "time < 5 AM (local)" });
+      setTransitStops([]);
+      return;
+    }
 
     const seq = ++fetchSeqRef.current;
     const b = map.getBounds();
@@ -875,20 +906,29 @@ export default function Home() {
     const cached = getStopsFromCache(s, w, n, e, zoom, 30);
     if (cached.length > 0 && seq === fetchSeqRef.current && showTransitRef.current) {
       setTransitStops(cached);
+      const modes: Partial<Record<TransitMode, number>> = {};
+      for (const stop of cached) modes[stop.mode] = (modes[stop.mode] ?? 0) + 1;
+      pushLog({ event: "CACHE_HIT", zoom, stopCount: cached.length, modes });
     }
 
     // Phase 2: fetch missing tiles in background, update when done
     const full = await fetchTransitStops(s, w, n, e, zoom, 30);
-    if (seq === fetchSeqRef.current && showTransitRef.current && full !== null) {
-      setTransitStops(full);
+    if (seq !== fetchSeqRef.current || !showTransitRef.current) return;
+    if (full === null) {
+      pushLog({ event: "ERROR", zoom, reason: "fetch returned null" });
+      return;
     }
+    setTransitStops(full);
+    const modes: Partial<Record<TransitMode, number>> = {};
+    for (const stop of full) modes[stop.mode] = (modes[stop.mode] ?? 0) + 1;
+    pushLog({ event: "FETCH", zoom, stopCount: full.length, modes });
 
     // Phase 3: prefetch adjacent tiles after 1.5 s idle
     if (prefetchTimerRef.current) clearTimeout(prefetchTimerRef.current);
     prefetchTimerRef.current = setTimeout(() => {
       if (seq === fetchSeqRef.current) prefetchAdjacentTiles(s, w, n, e);
     }, 1500);
-  }, []);
+  }, [pushLog]);
 
   useEffect(() => {
     if (!showTransit) { setTransitStops([]); return; }
@@ -1112,8 +1152,39 @@ export default function Home() {
           >
             About / API
           </a>
+
+          {/* Divider */}
+          <div className="h-px bg-white/[0.06] mx-1" />
+
+          {/* Log toggle */}
+          <button
+            onClick={() => setShowTransitLog(v => !v)}
+            title="Toggle transit API log"
+            className={`text-[10px] px-1.5 py-1 rounded transition-colors text-left ${
+              showTransitLog
+                ? "text-cyan-400 bg-cyan-400/10"
+                : "text-white/30 hover:text-white/60"
+            }`}
+          >
+            LOG {transitLogs.length > 0 && (
+              <span className="ml-0.5 text-white/20">({transitLogs.length})</span>
+            )}
+          </button>
+
+          {/* Zoom counter */}
+          <div className="px-1.5 py-0.5 text-[10px] text-white/25 tabular-nums select-none">
+            zoom {mapZoom.toFixed(1)}
+          </div>
         </div>
       </div>
+      {/* Transit log panel */}
+      {showTransitLog && (
+        <TransitLogPanel
+          logs={transitLogs}
+          onClear={() => setTransitLogs([])}
+        />
+      )}
+
       {/* Navigation sidebar — self-positions absolutely (see NavigationPanel) */}
       <NavigationPanel
         navMode={navMode}
