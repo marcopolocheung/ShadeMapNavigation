@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
-import type { TransitStop, TransitMode } from "../lib/transit";
 
 export interface AccumulationOptions {
   enabled: boolean;
@@ -22,10 +21,6 @@ interface MapViewProps {
   showSunLines?: boolean;
   mapClickActive?: boolean;
   onMarkerDragEnd?: (slot: 'A' | 'B', coord: { lng: number; lat: number }) => void;
-  transitStops?: TransitStop[];
-  showTransitStops?: boolean;
-  onTransitStopClick?: (stop: TransitStop) => void;
-  navTransitLeg?: { boardLngLat: [number, number]; alightLngLat: [number, number]; mode: string } | null;
 }
 
 const MAPTILER_KEY = process.env.NEXT_PUBLIC_MAPTILER_API_KEY ?? "";
@@ -143,10 +138,6 @@ export default function MapView({
   showSunLines = false,
   mapClickActive = false,
   onMarkerDragEnd,
-  transitStops,
-  showTransitStops,
-  onTransitStopClick,
-  navTransitLeg,
 }: MapViewProps) {
   const containerRef    = useRef<HTMLDivElement>(null);
   const mapRef          = useRef<maplibregl.Map | null>(null);
@@ -159,8 +150,7 @@ export default function MapView({
   const onMarkerDragEndRef = useRef(onMarkerDragEnd);
   const markerARef         = useRef<maplibregl.Marker | null>(null);
   const markerBRef         = useRef<maplibregl.Marker | null>(null);
-  const showSunLinesRef         = useRef(showSunLines);
-  const onTransitStopClickRef   = useRef(onTransitStopClick);
+  const showSunLinesRef    = useRef(showSunLines);
 
   const [sunViz, setSunViz] = useState<SunViz>({
     sunAz: 180, riseAz: null, setAz: null, bearing: 0,
@@ -168,7 +158,6 @@ export default function MapView({
 
   useEffect(() => { onMapClickRef.current = onMapClick; }, [onMapClick]);
   useEffect(() => { onMarkerDragEndRef.current = onMarkerDragEnd; }, [onMarkerDragEnd]);
-  useEffect(() => { onTransitStopClickRef.current = onTransitStopClick; }, [onTransitStopClick]);
 
   // -------------------------------------------------------------------------
   // Initialize map once
@@ -183,7 +172,6 @@ export default function MapView({
       center: [0, 20],
       zoom: 2,
       maxTileCacheSize: 50,
-      // @ts-expect-error — property exists at runtime but is missing from MapLibre types
       maxParallelImageRequests: 6,
       canvasContextAttributes: { preserveDrawingBuffer: true },
     });
@@ -257,65 +245,6 @@ export default function MapView({
       map.on("pitchend", update3DVisibility);
       update3DVisibility();
       if (!ENABLE_3D) map.setLayoutProperty("buildings-3d", "visibility", "none");
-
-      // Transit stops GeoJSON source (initially empty)
-      map.addSource("transit-stops", {
-        type: "geojson",
-        data: { type: "FeatureCollection", features: [] },
-        cluster: true,
-        clusterMaxZoom: 14,
-        clusterRadius: 30,
-      });
-      map.addLayer({
-        id: "transit-clusters",
-        type: "circle",
-        source: "transit-stops",
-        filter: ["has", "point_count"],
-        paint: {
-          "circle-color": "#ffffff",
-          "circle-radius": ["step", ["get", "point_count"], 12, 10, 16, 50, 20],
-          "circle-opacity": 0.7,
-          "circle-stroke-width": 1,
-          "circle-stroke-color": "#ffffff",
-          "circle-stroke-opacity": 0.4,
-        },
-      });
-      map.addLayer({
-        id: "transit-cluster-count",
-        type: "symbol",
-        source: "transit-stops",
-        filter: ["has", "point_count"],
-        layout: { "text-field": "{point_count_abbreviated}", "text-font": ["Open Sans Bold"], "text-size": 10 },
-        paint: { "text-color": "#111" },
-      });
-      map.addLayer({
-        id: "transit-stop-circles",
-        type: "circle",
-        source: "transit-stops",
-        filter: ["!", ["has", "point_count"]],
-        paint: {
-          "circle-radius": 6,
-          "circle-color": [
-            "match", ["get", "mode"],
-            "subway", "#0070c9", "rail", "#ef4444", "tram", "#a855f7", "bus", "#22c55e", "ferry", "#06b6d4",
-            "#ffffff",
-          ],
-          "circle-stroke-width": 1.5,
-          "circle-stroke-color": "#ffffff",
-          "circle-stroke-opacity": 0.85,
-          "circle-opacity": 0.9,
-        },
-      });
-
-      // Transit stop click handler
-      map.on("click", "transit-stop-circles", (e) => {
-        if (!e.features?.length) return;
-        const p = e.features[0].properties as { id: number; lat: number; lon: number; name: string; mode: string };
-        onTransitStopClickRef.current?.({ id: p.id, lat: p.lat, lon: p.lon, name: p.name, mode: p.mode as TransitMode, rankScore: 0 });
-        e.preventDefault();
-      });
-      map.on("mouseenter", "transit-stop-circles", () => { map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", "transit-stop-circles", () => { map.getCanvas().style.cursor = ""; });
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const { default: ShadeMap } = (await import("mapbox-gl-shadow-simulator")) as { default: any };
@@ -487,74 +416,6 @@ export default function MapView({
       if (map.getSource("nav-route")) map.removeSource("nav-route");
     }
   }, [navRoute]);
-
-  // -------------------------------------------------------------------------
-  // Transit stops layer
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-    const source = map.getSource("transit-stops") as maplibregl.GeoJSONSource | undefined;
-    if (!source) return;
-
-    const vis = showTransitStops ? "visible" : "none";
-    ["transit-clusters", "transit-cluster-count", "transit-stop-circles"].forEach((id) => {
-      if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", vis);
-    });
-
-    if (!showTransitStops) return;
-
-    source.setData({
-      type: "FeatureCollection",
-      features: (transitStops ?? []).map((s) => ({
-        type: "Feature",
-        geometry: { type: "Point", coordinates: [s.lon, s.lat] },
-        properties: { id: s.id, lat: s.lat, lon: s.lon, name: s.name, mode: s.mode },
-      })),
-    });
-  }, [transitStops, showTransitStops]);
-
-  // -------------------------------------------------------------------------
-  // Transit leg dashed overlay (selected hybrid route)
-  // -------------------------------------------------------------------------
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !map.isStyleLoaded()) return;
-
-    if (navTransitLeg) {
-      const data: GeoJSON.FeatureCollection = {
-        type: "FeatureCollection",
-        features: [{
-          type: "Feature",
-          properties: { mode: navTransitLeg.mode },
-          geometry: { type: "LineString", coordinates: [navTransitLeg.boardLngLat, navTransitLeg.alightLngLat] },
-        }],
-      };
-      if (!map.getSource("transit-leg")) {
-        map.addSource("transit-leg", { type: "geojson", data });
-        map.addLayer({
-          id: "transit-leg-line",
-          type: "line",
-          source: "transit-leg",
-          paint: {
-            "line-color": [
-              "match", ["get", "mode"],
-              "subway", "#0070c9", "rail", "#ef4444", "tram", "#a855f7", "bus", "#22c55e", "ferry", "#06b6d4",
-              "#ffffff",
-            ],
-            "line-width": 5,
-            "line-opacity": 0.9,
-            "line-dasharray": [4, 2],
-          },
-        });
-      } else {
-        (map.getSource("transit-leg") as maplibregl.GeoJSONSource).setData(data);
-      }
-    } else {
-      if (map.getLayer("transit-leg-line")) map.removeLayer("transit-leg-line");
-      if (map.getSource("transit-leg"))     map.removeSource("transit-leg");
-    }
-  }, [navTransitLeg]);
 
   // -------------------------------------------------------------------------
   // Sun compass SVG

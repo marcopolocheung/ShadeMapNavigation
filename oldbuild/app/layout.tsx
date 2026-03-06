@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "ShadeMap",
-  description: "Browser-based shadow-focused navigation for any location on Earth",
+  description: "Browser-based sun shadow simulation for any location on Earth",
 };
 
 export default function RootLayout({

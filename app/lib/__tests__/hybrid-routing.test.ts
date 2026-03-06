@@ -5,7 +5,7 @@ import type { TransitStop } from "../transit";
 import type { RouteOption } from "../routing";
 
 function stop(id: number, lon: number, lat: number, mode: TransitStop["mode"] = "subway"): TransitStop {
-  return { id, lon, lat, name: `Stop ${id}`, mode };
+  return { id, lon, lat, name: `Stop ${id}`, mode, rankScore: 90 };
 }
 
 const A: [number, number] = [11.500, 48.100];

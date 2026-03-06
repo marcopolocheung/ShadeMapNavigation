@@ -12,9 +12,6 @@ import DateInput from "./components/DateInput";
 import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
-import { fetchTransitStops } from "./lib/transit";
-import type { TransitStop } from "./lib/transit";
-import { findBestHybridCandidate, hybridCandidateToRouteOption } from "./lib/hybrid-routing";
 import { geocodeReverse } from "./lib/nominatim";
 import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, bfsReachable, snapToReachableEdge, RouteOption } from "./lib/routing";
 import type { GraphEdge, RoutingGraph } from "./lib/routing";
@@ -243,15 +240,6 @@ export default function Home() {
   const [pendingSlot, setPendingSlot] = useState<'A' | 'B' | null>(null);
   const pendingSlotRef = useRef<'A' | 'B' | null>(null);
   pendingSlotRef.current = pendingSlot;
-
-  // Transit state
-  const [showTransit, setShowTransit]           = useState(false);
-  const [transitStops, setTransitStops]         = useState<TransitStop[]>([]);
-  const [transitPopupStop, setTransitPopupStop] = useState<TransitStop | null>(null);
-  const showTransitRef   = useRef(showTransit);
-  showTransitRef.current = showTransit;
-  const transitStopsRef   = useRef<TransitStop[]>(transitStops);
-  transitStopsRef.current = transitStops;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [sliderMode, setSliderMode] = useState<"time" | "day">("time");
@@ -786,36 +774,6 @@ export default function Home() {
           "No walkable path found between the selected points. Try points on connected streets."
         );
 
-      // Hybrid route (only when transit toggle is on and stops are available)
-      if (showTransitRef.current && transitStopsRef.current.length >= 2) {
-        const { hours: mapHour } = toMapLocal(dateRef.current, mapUtcOffsetMinRef.current);
-        const candidate = findBestHybridCandidate({
-          a,
-          b,
-          stops: transitStopsRef.current,
-          walkRoutes: options,
-          mapLocalHour: mapHour,
-        });
-        if (candidate) {
-          const hybridOption = hybridCandidateToRouteOption(candidate);
-          // Stitch full geometry: A → board → alight → B
-          hybridOption.geojson = {
-            type: "Feature",
-            properties: { isTransit: true },
-            geometry: {
-              type: "LineString",
-              coordinates: [
-                [a[0], a[1]],
-                [candidate.boardStop.lon, candidate.boardStop.lat],
-                [candidate.alightStop.lon, candidate.alightStop.lat],
-                [b[0], b[1]],
-              ],
-            },
-          };
-          options.push(hybridOption);
-        }
-      }
-
       // 7. Record metrics before updating state
       const routeSnapshots = options.map((o) => ({
         label: o.label,
@@ -853,59 +811,7 @@ export default function Home() {
     }
   }, []);
 
-  const transitFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const fetchTransitForViewport = useCallback(async () => {
-    const map = mapRef.current;
-    if (!map || !showTransitRef.current) return;
-    const zoom = map.getZoom();
-    // Safety floor: continent-scale bboxes would cause Overpass timeouts
-    if (zoom < 9) return;
-    // Time-of-day gate: no transit midnight–5 AM map-local time
-    const localHours = toMapLocal(dateRef.current, mapUtcOffsetMinRef.current).hours;
-    if (localHours < 5) { setTransitStops([]); return; }
-    const b = map.getBounds();
-    const stops = await fetchTransitStops(b.getSouth(), b.getWest(), b.getNorth(), b.getEast(), zoom, 30);
-    // null = error (rate-limit, network failure) — keep previous stops rather than blanking
-    if (showTransitRef.current && stops !== null) setTransitStops(stops);
-  }, []);
-
-  useEffect(() => {
-    if (!showTransit) { setTransitStops([]); return; }
-    fetchTransitForViewport();
-    const map = mapRef.current;
-    if (!map) return;
-    // Debounce moveend: rapid panning fires many events; wait 400 ms after the last one
-    const handler = () => {
-      if (transitFetchTimerRef.current) clearTimeout(transitFetchTimerRef.current);
-      transitFetchTimerRef.current = setTimeout(fetchTransitForViewport, 400);
-    };
-    map.on("moveend", handler);
-    return () => {
-      map.off("moveend", handler);
-      if (transitFetchTimerRef.current) clearTimeout(transitFetchTimerRef.current);
-    };
-  }, [showTransit, fetchTransitForViewport]);
-
-  // Strip hybrid route cards when transit is toggled off
-  useEffect(() => {
-    if (showTransit) return;
-    setNavRoutes((prev) => {
-      const filtered = prev.filter((r) => !r.transitLeg);
-      if (filtered.length !== prev.length) setSelectedRouteIndex(0);
-      return filtered;
-    });
-  }, [showTransit]);
-
   const selectedNavRoute = navRoutes[selectedRouteIndex]?.geojson ?? null;
-  const selectedRoute = navRoutes[selectedRouteIndex];
-  const navTransitLeg = selectedRoute?.transitLeg
-    ? {
-        boardLngLat:  [selectedRoute.transitLeg.boardStop.lon,  selectedRoute.transitLeg.boardStop.lat]  as [number, number],
-        alightLngLat: [selectedRoute.transitLeg.alightStop.lon, selectedRoute.transitLeg.alightStop.lat] as [number, number],
-        mode: selectedRoute.transitLeg.boardStop.mode,
-      }
-    : null;
 
   const { hours: _localH, minutes: _localM, year: _localYear } = toMapLocal(date, mapUtcOffsetMin);
   const mapLocalMins = _localH * 60 + _localM;
@@ -923,10 +829,6 @@ export default function Home() {
         showSunLines={showSunLines}
         mapClickActive={pendingSlot !== null}
         onMarkerDragEnd={handleMarkerDragEnd}
-        transitStops={transitStops}
-        showTransitStops={showTransit}
-        onTransitStopClick={setTransitPopupStop}
-        navTransitLeg={navTransitLeg}
       />
 
       {/* Pending waypoint selection banner */}
@@ -1117,10 +1019,6 @@ export default function Home() {
         pendingSlot={pendingSlot}
         onSetPendingSlot={setPendingSlot}
         locationSearchSlot={navMode ? <LocationSearch onSelect={flyTo} /> : undefined}
-        showTransit={showTransit}
-        onToggleTransit={() => setShowTransit((t) => !t)}
-        transitPopupStop={transitPopupStop}
-        onDismissTransitPopup={() => setTransitPopupStop(null)}
       />
     </div>
   );

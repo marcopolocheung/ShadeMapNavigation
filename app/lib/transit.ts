@@ -87,88 +87,41 @@ export function clearTileCache(): void {
 
 // ─── Overpass fetch ───────────────────────────────────────────────────────────
 
-const OVERPASS_URL          = "https://overpass-api.de/api/interpreter";
-const OVERPASS_FALLBACK_URL = "https://overpass.kumi.systems/api/interpreter";
-const FETCH_TIMEOUT_MS      = 30_000;
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
+];
+const FETCH_TIMEOUT_MS = 20_000;
 
-async function postOverpass(url: string, body: string, signal?: AbortSignal): Promise<Response> {
-  return fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "ShadeMapNav/1.0" },
-    body,
-    signal,
-  });
-}
-
-interface StopCacheEntry { south: number; west: number; north: number; east: number; stops: TransitStop[] }
-const STOP_CACHE_MAX = 5;
-const stopCache: StopCacheEntry[] = [];
-
-function cacheContains(e: StopCacheEntry, s: number, w: number, n: number, east: number): boolean {
-  return e.south <= s && e.west <= w && e.north >= n && e.east >= east;
-}
-
-/**
- * Fetches transit stops from OSM for the bounding box.
- * Returns TransitStop[] on success (may be empty for areas with no stops).
- * Returns null on any network/API error — callers should keep their previous result.
- */
-export async function fetchTransitStops(
-  south: number, west: number, north: number, east: number,
-  zoom = 14, limit = 30
-): Promise<TransitStop[] | null> {
-  if (zoom < 9) return [];
-  for (const entry of stopCache) {
-    if (cacheContains(entry, south, west, north, east)) {
-      const minRank = rankThresholdForZoom(zoom);
-      return entry.stops.filter(s => s.rankScore >= minRank).slice(0, Math.min(limit, 60));
-    }
-  }
-
-  const query = `[out:json][timeout:25];
+function buildQuery(south: number, west: number, north: number, east: number): string {
+  return `[out:json][timeout:18][maxsize:1000000];
 (
   node["highway"="bus_stop"](${south},${west},${north},${east});
   node["railway"~"^(station|halt|tram_stop|subway_entrance)$"](${south},${west},${north},${east});
-  node["public_transport"="stop_position"](${south},${west},${north},${east});
   node["amenity"="ferry_terminal"](${south},${west},${north},${east});
 );
 out body;`;
+}
 
+/** Race all Overpass endpoints; returns the first valid JSON response body, or null if all fail. */
+async function raceOverpass(query: string, signal?: AbortSignal): Promise<string | null> {
   const body = `data=${encodeURIComponent(query)}`;
-  const ctrl = new AbortController();
-  const tid  = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-
-  let res: Response;
+  const tryEndpoint = async (url: string): Promise<string> => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "ShadeMapNav/1.0" },
+      body,
+      signal,
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const text = await r.text();
+    if (text.trimStart().startsWith("<")) throw new Error("XML response (rate-limited)");
+    return text;
+  };
   try {
-    res = await postOverpass(OVERPASS_URL, body, ctrl.signal);
-    if (!res.ok && res.status >= 500) res = await postOverpass(OVERPASS_FALLBACK_URL, body, ctrl.signal);
+    return await Promise.any(OVERPASS_ENDPOINTS.map(url => tryEndpoint(url)));
   } catch {
-    clearTimeout(tid);
     return null;
   }
-  clearTimeout(tid);
-  if (!res.ok) return null;
-
-  const text = await res.text();
-  if (text.trimStart().startsWith("<")) return null;
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const elements: any[] = (JSON.parse(text) as { elements?: any[] }).elements ?? [];
-  const seen = new Set<number>();
-  const stops: TransitStop[] = [];
-
-  for (const el of elements) {
-    if (el.type !== "node" || seen.has(el.id)) continue;
-    seen.add(el.id);
-    const tags: Record<string, string | undefined> = el.tags ?? {};
-    const mode = inferMode(tags);
-    stops.push({ id: el.id, lat: el.lat, lon: el.lon, name: tags.name ?? tags["name:en"] ?? "", mode, rankScore: modeRankScore(mode) });
-  }
-
-  stops.sort((a, b) => b.rankScore - a.rankScore);
-  stopCache.unshift({ south, west, north, east, stops });
-  if (stopCache.length > STOP_CACHE_MAX) stopCache.pop();
-
-  const minRank = rankThresholdForZoom(zoom);
-  return stops.filter(s => s.rankScore >= minRank).slice(0, Math.min(limit, 60));
 }

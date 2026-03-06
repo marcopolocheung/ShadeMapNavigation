@@ -171,6 +171,39 @@ describe("fetchTransitStops", () => {
   });
 });
 
+describe("raceOverpass (tested via fetchTransitStops)", () => {
+  it("succeeds when the primary endpoint fails but a fallback responds", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (url.includes("overpass-api.de")) return Promise.reject(new Error("Network error"));
+      return Promise.resolve({ ok: true, status: 200,
+        text: async () => JSON.stringify({ elements: [] }) });
+    }));
+    const stops = await fetchTransitStops(...nextBbox(), 14, 30);
+    expect(stops).not.toBeNull();
+  });
+
+  it("returns null when all three endpoints fail", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("Network error")));
+    const stops = await fetchTransitStops(...nextBbox(), 14, 30);
+    expect(stops).toBeNull();
+  });
+
+  it("returns null when all endpoints return HTTP 500", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 500, text: async () => "" }));
+    const stops = await fetchTransitStops(...nextBbox(), 14, 30);
+    expect(stops).toBeNull();
+  });
+
+  it("returns null when all endpoints return XML (rate-limited)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      text: async () => '<?xml version="1.0"?><osm/>',
+    }));
+    const stops = await fetchTransitStops(...nextBbox(), 14, 30);
+    expect(stops).toBeNull();
+  });
+});
+
 describe("tileKey", () => {
   it("formats latFloor and lonFloor to 2 decimal places", () => {
     expect(tileKey(48, 11.25)).toBe("lat48.00_lon11.25");
