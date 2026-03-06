@@ -19,6 +19,7 @@ npm run dev                         # http://localhost:3000
 |---|---|---|
 | `NEXT_PUBLIC_SHADEMAP_API_KEY` | https://shademap.app/about/ | Free (Educational tier, localhost only) |
 | `NEXT_PUBLIC_MAPTILER_API_KEY` | https://maptiler.com/ | Free (100k tiles/month) |
+| `NEXT_PUBLIC_TRANSITLAND_API_KEY` | https://www.transit.land/ | Free tier |
 
 ---
 
@@ -142,7 +143,7 @@ MAX_SHADE_SAVING = 0.7   // caps saving so fully-shaded edges still cost 30% of 
 
 ---
 
-## Tile Sources (all free)
+## Tile Sources
 
 | Purpose | Source | API Key? |
 |---|---|---|
@@ -152,6 +153,7 @@ MAX_SHADE_SAVING = 0.7   // caps saving so fully-shaded edges still cost 30% of 
 | 3D terrain mesh | Same AWS Terrarium tiles, `encoding: "terrarium"`, `raster-dem` type (lazy, only when tilted and `ENABLE_3D=true`) | No |
 | Geocoding | Nominatim (`nominatim.openstreetmap.org/search`) — requires `User-Agent` header | No |
 | Routing graph | Overpass API (`overpass-api.de`) — requires `User-Agent` header | No |
+| Transit stops | Transitland REST v2 (`transit.land/api/v2/rest/stops`) | Yes (`NEXT_PUBLIC_TRANSITLAND_API_KEY`) |
 
 **Building query (`getFeatures`):**
 - Source: `maptiler_planet`, layer: `building`

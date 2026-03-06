@@ -14,7 +14,7 @@ import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
 import { fetchTransitStops, getStopsFromCache, prefetchAdjacentTiles } from "./lib/transit";
-import type { TransitStop, TransitMode } from "./lib/transit";
+import type { TransitStop, TransitMode, TransitSource } from "./lib/transit";
 import { findBestHybridCandidate, hybridCandidateToRouteOption } from "./lib/hybrid-routing";
 import { geocodeReverse } from "./lib/nominatim";
 import { snapToEdge, paretoRoutes, graphToGeoJSON, haversineMeters, bfsReachable, snapToReachableEdge, RouteOption } from "./lib/routing";
@@ -260,6 +260,7 @@ export default function Home() {
   const [showTransit, setShowTransit]           = useState(false);
   const [transitStops, setTransitStops]         = useState<TransitStop[]>([]);
   const [transitPopupStop, setTransitPopupStop] = useState<TransitStop | null>(null);
+  const [transitSource, setTransitSource]       = useState<TransitSource>("transitland");
 
   // Debug / log state
   const [mapZoom, setMapZoom]                   = useState(2);
@@ -269,6 +270,8 @@ export default function Home() {
   showTransitRef.current = showTransit;
   const transitStopsRef   = useRef<TransitStop[]>(transitStops);
   transitStopsRef.current = transitStops;
+  const transitSourceRef   = useRef<TransitSource>(transitSource);
+  transitSourceRef.current = transitSource;
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [sliderMode, setSliderMode] = useState<"time" | "day">("time");
@@ -902,8 +905,10 @@ export default function Home() {
     const b = map.getBounds();
     const [s, w, n, e] = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
 
+    const src = transitSourceRef.current;
+
     // Phase 1: show cached stops immediately (zero latency)
-    const cached = getStopsFromCache(s, w, n, e, zoom, 30);
+    const cached = getStopsFromCache(s, w, n, e, zoom, 30, src);
     if (cached.length > 0 && seq === fetchSeqRef.current && showTransitRef.current) {
       setTransitStops(cached);
       const modes: Partial<Record<TransitMode, number>> = {};
@@ -912,10 +917,10 @@ export default function Home() {
     }
 
     // Phase 2: fetch missing tiles in background, update when done
-    const full = await fetchTransitStops(s, w, n, e, zoom, 30);
+    const full = await fetchTransitStops(s, w, n, e, zoom, 30, src);
     if (seq !== fetchSeqRef.current || !showTransitRef.current) return;
-    if (full === null) {
-      pushLog({ event: "ERROR", zoom, reason: "fetch returned null" });
+    if (typeof full === "string") {
+      pushLog({ event: "ERROR", zoom, reason: full });
       return;
     }
     setTransitStops(full);
@@ -926,7 +931,7 @@ export default function Home() {
     // Phase 3: prefetch adjacent tiles after 1.5 s idle
     if (prefetchTimerRef.current) clearTimeout(prefetchTimerRef.current);
     prefetchTimerRef.current = setTimeout(() => {
-      if (seq === fetchSeqRef.current) prefetchAdjacentTiles(s, w, n, e);
+      if (seq === fetchSeqRef.current) prefetchAdjacentTiles(s, w, n, e, src);
     }, 1500);
   }, [pushLog]);
 
@@ -947,6 +952,14 @@ export default function Home() {
       if (prefetchTimerRef.current)     clearTimeout(prefetchTimerRef.current);
     };
   }, [showTransit, fetchTransitForViewport]);
+
+  // Re-fetch when the transit source is switched while transit is on
+  useEffect(() => {
+    if (!showTransit) return;
+    setTransitStops([]);
+    fetchSeqRef.current++;
+    fetchTransitForViewport();
+  }, [transitSource, fetchTransitForViewport]);
 
   // Strip hybrid route cards when transit is toggled off
   useEffect(() => {
@@ -1211,6 +1224,8 @@ export default function Home() {
         locationSearchSlot={navMode ? <LocationSearch onSelect={flyTo} /> : undefined}
         showTransit={showTransit}
         onToggleTransit={() => setShowTransit((t) => !t)}
+        transitSource={transitSource}
+        onTransitSourceChange={setTransitSource}
         transitPopupStop={transitPopupStop}
         onDismissTransitPopup={() => setTransitPopupStop(null)}
       />

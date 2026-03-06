@@ -258,7 +258,37 @@ export default function MapView({
       update3DVisibility();
       if (!ENABLE_3D) map.setLayoutProperty("buildings-3d", "visibility", "none");
 
-      // Transit stops GeoJSON source (initially empty)
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const { default: ShadeMap } = (await import("mapbox-gl-shadow-simulator")) as { default: any };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const shade: any = new ShadeMap({
+        apiKey: SHADEMAP_KEY,
+        date,
+        color: "#01112f",
+        opacity: 0.7,
+        terrainSource: {
+          tileSize: 256,
+          maxZoom: 15,
+          getSourceUrl: ({ x, y, z }: { x: number; y: number; z: number }) =>
+            `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`,
+          getElevation: ({ r, g, b }: { r: number; g: number; b: number; a: number }) =>
+            r * 256 + g + b / 256 - 32768,
+        },
+        getFeatures: async () => {
+          if (map.getZoom() < 12) return [];
+          await waitForMapLoad(map);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const features: any[] = map.querySourceFeatures("maptiler_planet", { sourceLayer: "building" });
+          features.forEach((f) => {
+            if (f.properties && !f.properties.height)
+              f.properties.height = f.properties.render_height ?? 3.1;
+          });
+          features.sort((a, b) => (a.properties?.height ?? 0) - (b.properties?.height ?? 0));
+          return features;
+        },
+      }).addTo(map);
+
+      // Transit stops added AFTER ShadeMap so they render above the shadow overlay
       map.addSource("transit-stops", {
         type: "geojson",
         data: { type: "FeatureCollection", features: [] },
@@ -316,36 +346,6 @@ export default function MapView({
       });
       map.on("mouseenter", "transit-stop-circles", () => { map.getCanvas().style.cursor = "pointer"; });
       map.on("mouseleave", "transit-stop-circles", () => { map.getCanvas().style.cursor = ""; });
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const { default: ShadeMap } = (await import("mapbox-gl-shadow-simulator")) as { default: any };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const shade: any = new ShadeMap({
-        apiKey: SHADEMAP_KEY,
-        date,
-        color: "#01112f",
-        opacity: 0.7,
-        terrainSource: {
-          tileSize: 256,
-          maxZoom: 15,
-          getSourceUrl: ({ x, y, z }: { x: number; y: number; z: number }) =>
-            `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`,
-          getElevation: ({ r, g, b }: { r: number; g: number; b: number; a: number }) =>
-            r * 256 + g + b / 256 - 32768,
-        },
-        getFeatures: async () => {
-          if (map.getZoom() < 12) return [];
-          await waitForMapLoad(map);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const features: any[] = map.querySourceFeatures("maptiler_planet", { sourceLayer: "building" });
-          features.forEach((f) => {
-            if (f.properties && !f.properties.height)
-              f.properties.height = f.properties.render_height ?? 3.1;
-          });
-          features.sort((a, b) => (a.properties?.height ?? 0) - (b.properties?.height ?? 0));
-          return features;
-        },
-      }).addTo(map);
 
       shadeRef.current = shade;
       map.on("resize", () => { shadeRef.current?.setDate(dateRef.current); });

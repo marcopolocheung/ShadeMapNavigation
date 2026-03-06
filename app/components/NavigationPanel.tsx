@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { RouteOption } from "../lib/routing";
 import { geocodeForward, type NominatimResult } from "../lib/nominatim";
-import type { TransitStop, TransitMode } from "../lib/transit";
+import type { TransitStop, TransitMode, TransitSource } from "../lib/transit";
 import { TRANSIT_MODE_COLOR } from "../lib/transit";
 
 export interface NavigationPanelProps {
@@ -31,6 +31,8 @@ export interface NavigationPanelProps {
   locationSearchSlot?: React.ReactNode;
   showTransit?: boolean;
   onToggleTransit?: () => void;
+  transitSource?: TransitSource;
+  onTransitSourceChange?: (s: TransitSource) => void;
   transitPopupStop?: TransitStop | null;
   onDismissTransitPopup?: () => void;
 }
@@ -261,6 +263,8 @@ export default function NavigationPanel({
   locationSearchSlot,
   showTransit,
   onToggleTransit,
+  transitSource,
+  onTransitSourceChange,
   transitPopupStop,
   onDismissTransitPopup,
 }: NavigationPanelProps) {
@@ -408,23 +412,42 @@ export default function NavigationPanel({
 
             {/* Transit toggle */}
             {onToggleTransit && (
-              <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={onToggleTransit}
-                  className={`flex-1 px-2 py-1.5 rounded text-xs font-medium border transition-colors flex items-center justify-center gap-1.5 ${
-                    showTransit
-                      ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300"
-                      : "border-white/10 text-white/50 hover:text-white/80 hover:border-white/25"
-                  }`}
-                  title={showTransit ? "Hide transit stops" : "Show transit stops"}
-                >
-                  <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor" aria-hidden="true">
-                    <rect x="1" y="1" width="9" height="7" rx="1.5" />
-                    <circle cx="3" cy="9.5" r="1" />
-                    <circle cx="8" cy="9.5" r="1" />
-                  </svg>
-                  {showTransit ? "Transit on" : "Show Transit"}
-                </button>
+              <div className="flex flex-col gap-1 shrink-0">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={onToggleTransit}
+                    className={`flex-1 px-2 py-1.5 rounded text-xs font-medium border transition-colors flex items-center justify-center gap-1.5 ${
+                      showTransit
+                        ? "bg-cyan-500/20 border-cyan-500/60 text-cyan-300"
+                        : "border-white/10 text-white/50 hover:text-white/80 hover:border-white/25"
+                    }`}
+                    title={showTransit ? "Hide transit stops" : "Show transit stops"}
+                  >
+                    <svg width="11" height="11" viewBox="0 0 11 11" fill="currentColor" aria-hidden="true">
+                      <rect x="1" y="1" width="9" height="7" rx="1.5" />
+                      <circle cx="3" cy="9.5" r="1" />
+                      <circle cx="8" cy="9.5" r="1" />
+                    </svg>
+                    {showTransit ? "Transit on" : "Show Transit"}
+                  </button>
+                </div>
+                {showTransit && onTransitSourceChange && (
+                  <div className="flex gap-1">
+                    {(["transitland", "overpass"] as TransitSource[]).map((src) => (
+                      <button
+                        key={src}
+                        onClick={() => onTransitSourceChange(src)}
+                        className={`flex-1 px-1.5 py-0.5 rounded text-[10px] border transition-colors ${
+                          transitSource === src
+                            ? "bg-cyan-500/20 border-cyan-500/50 text-cyan-300"
+                            : "border-white/10 text-white/35 hover:text-white/60 hover:border-white/20"
+                        }`}
+                      >
+                        {src === "transitland" ? "Transitland" : "Overpass"}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
