@@ -12,7 +12,7 @@ import DateInput from "./components/DateInput";
 import DaySlider from "./components/DaySlider";
 import type { AccumulationOptions } from "./components/MapView";
 import { fetchRoutingGraph } from "./lib/overpass";
-import { fetchTransitStops } from "./lib/transit";
+import { fetchTransitStops, getStopsFromCache, prefetchAdjacentTiles } from "./lib/transit";
 import type { TransitStop } from "./lib/transit";
 import { findBestHybridCandidate, hybridCandidateToRouteOption } from "./lib/hybrid-routing";
 import { geocodeReverse } from "./lib/nominatim";
@@ -854,20 +854,40 @@ export default function Home() {
   }, []);
 
   const transitFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const prefetchTimerRef     = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fetchSeqRef          = useRef(0);
 
   const fetchTransitForViewport = useCallback(async () => {
     const map = mapRef.current;
     if (!map || !showTransitRef.current) return;
     const zoom = map.getZoom();
-    // Safety floor: continent-scale bboxes would cause Overpass timeouts
+    // Safety floor: continent-scale bboxes cause Overpass timeouts
     if (zoom < 9) return;
     // Time-of-day gate: no transit midnight–5 AM map-local time
     const localHours = toMapLocal(dateRef.current, mapUtcOffsetMinRef.current).hours;
     if (localHours < 5) { setTransitStops([]); return; }
+
+    const seq = ++fetchSeqRef.current;
     const b = map.getBounds();
-    const stops = await fetchTransitStops(b.getSouth(), b.getWest(), b.getNorth(), b.getEast(), zoom, 30);
-    // null = error (rate-limit, network failure) — keep previous stops rather than blanking
-    if (showTransitRef.current && stops !== null) setTransitStops(stops);
+    const [s, w, n, e] = [b.getSouth(), b.getWest(), b.getNorth(), b.getEast()];
+
+    // Phase 1: show cached stops immediately (zero latency)
+    const cached = getStopsFromCache(s, w, n, e, zoom, 30);
+    if (cached.length > 0 && seq === fetchSeqRef.current && showTransitRef.current) {
+      setTransitStops(cached);
+    }
+
+    // Phase 2: fetch missing tiles in background, update when done
+    const full = await fetchTransitStops(s, w, n, e, zoom, 30);
+    if (seq === fetchSeqRef.current && showTransitRef.current && full !== null) {
+      setTransitStops(full);
+    }
+
+    // Phase 3: prefetch adjacent tiles after 1.5 s idle
+    if (prefetchTimerRef.current) clearTimeout(prefetchTimerRef.current);
+    prefetchTimerRef.current = setTimeout(() => {
+      if (seq === fetchSeqRef.current) prefetchAdjacentTiles(s, w, n, e);
+    }, 1500);
   }, []);
 
   useEffect(() => {
@@ -884,6 +904,7 @@ export default function Home() {
     return () => {
       map.off("moveend", handler);
       if (transitFetchTimerRef.current) clearTimeout(transitFetchTimerRef.current);
+      if (prefetchTimerRef.current)     clearTimeout(prefetchTimerRef.current);
     };
   }, [showTransit, fetchTransitForViewport]);
 
